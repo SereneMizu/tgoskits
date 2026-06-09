@@ -262,7 +262,7 @@ fn uimage_load_paddr_expr(cargo: &Cargo, arch: &str) -> anyhow::Result<String> {
     }
 
     match arch {
-        "aarch64" => Ok("0x200000".to_string()),
+        "aarch64" => Ok("0x02000000".to_string()),
         "riscv64" => Ok("0x80200000".to_string()),
         other => Err(anyhow::anyhow!(
             "AX_CONFIG_PATH is required for UIMAGE generation on {other}"
