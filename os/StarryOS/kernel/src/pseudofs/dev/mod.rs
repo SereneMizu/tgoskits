@@ -18,14 +18,14 @@ mod r#loop;
 mod loop_block;
 #[cfg(feature = "ext4")]
 pub use r#loop::LoopDevice;
-#[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+#[cfg(feature = "sg2002")]
 pub mod ion;
 #[cfg(feature = "memtrack")]
 mod memtrack;
 #[cfg(feature = "rknpu")]
 mod rknpu_drm;
 mod rtc;
-#[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+#[cfg(feature = "sg2002")]
 pub mod tpu;
 pub mod tty;
 
@@ -46,10 +46,10 @@ use core::any::Any;
 use ax_errno::AxError;
 use ax_sync::Mutex;
 use axfs_ng_vfs::{DeviceId, Filesystem, NodeFlags, NodeType, VfsResult};
-#[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+#[cfg(feature = "sg2002")]
 use spin::Once;
 
-#[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+#[cfg(feature = "sg2002")]
 pub static ION_DEVICE: Once<Arc<ion::IonDevice>> = Once::new();
 #[cfg(feature = "dev-log")]
 pub use log::bind_dev_log;
@@ -417,7 +417,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         SimpleDir::new_maker(fs.clone(), Arc::new(event::input_devices(fs.clone()))),
     );
 
-    #[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+    #[cfg(feature = "sg2002")]
     {
         root.add(
             "cvi-tpu0",
@@ -439,6 +439,9 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                 ion_device,
             ),
         );
+    }
+    #[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+    {
         root.add(
             "ttyS1",
             Device::new(
