@@ -14,7 +14,7 @@ pub use rdif_base::{DriverGeneric, KError};
 
 pub type BIrqHandler = Box<dyn TIrqHandler>;
 pub type BSender = Box<dyn TSender>;
-pub type BReciever = Box<dyn TReciever>;
+pub type BReceiver = Box<dyn TReceiver>;
 pub type BSerial = Box<dyn Interface>;
 
 impl DriverGeneric for Box<dyn Interface> {
@@ -166,7 +166,7 @@ impl Config {
 pub trait InterfaceRaw: Send + Any + 'static {
     type IrqHandler: TIrqHandler;
     type Sender: TSender;
-    type Reciever: TReciever;
+    type Receiver: TReceiver;
 
     fn name(&self) -> &str;
 
@@ -200,10 +200,10 @@ pub trait InterfaceRaw: Send + Any + 'static {
 
     fn irq_handler(&mut self) -> Option<Self::IrqHandler>;
     fn take_tx(&mut self) -> Option<Self::Sender>;
-    fn take_rx(&mut self) -> Option<Self::Reciever>;
+    fn take_rx(&mut self) -> Option<Self::Receiver>;
 
     fn set_tx(&mut self, tx: Self::Sender) -> Result<(), SetBackError>;
-    fn set_rx(&mut self, rx: Self::Reciever) -> Result<(), SetBackError>;
+    fn set_rx(&mut self, rx: Self::Receiver) -> Result<(), SetBackError>;
 }
 
 #[derive(Clone, Copy)]
@@ -244,7 +244,7 @@ impl Display for SetBackError {
 pub trait Interface: DriverGeneric {
     fn irq_handler(&mut self) -> Option<Box<dyn TIrqHandler>>;
     fn take_tx(&mut self) -> Option<Box<dyn TSender>>;
-    fn take_rx(&mut self) -> Option<Box<dyn TReciever>>;
+    fn take_rx(&mut self) -> Option<Box<dyn TReceiver>>;
     /// Base address of the serial port
     fn base_addr(&self) -> usize;
 
@@ -284,7 +284,7 @@ pub trait TSender: Send + 'static {
     }
 }
 
-pub trait TReciever: Send + 'static {
+pub trait TReceiver: Send + 'static {
     fn read_byte(&mut self) -> Option<Result<u8, TransferError>>;
 
     /// Recv data into buf, return recv bytes. If return bytes is less than buf.len(), it means no more data.
@@ -308,5 +308,85 @@ pub trait TReciever: Send + 'static {
         }
 
         Ok(read_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use super::*;
+
+    struct LimitedSender {
+        capacity: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl TSender for LimitedSender {
+        fn write_byte(&mut self, byte: u8) -> bool {
+            if self.bytes.len() == self.capacity {
+                return false;
+            }
+            self.bytes.push(byte);
+            true
+        }
+    }
+
+    struct ScriptedReceiver {
+        next: Vec<Option<Result<u8, TransferError>>>,
+    }
+
+    impl TReceiver for ScriptedReceiver {
+        fn read_byte(&mut self) -> Option<Result<u8, TransferError>> {
+            if self.next.is_empty() {
+                None
+            } else {
+                self.next.remove(0)
+            }
+        }
+    }
+
+    #[test]
+    fn write_bytes_stops_on_full() {
+        let mut sender = LimitedSender {
+            capacity: 2,
+            bytes: Vec::new(),
+        };
+
+        let written = sender.write_bytes(&[0x11, 0x22, 0x33]);
+
+        assert_eq!(written, 2);
+        assert_eq!(sender.bytes, [0x11, 0x22]);
+    }
+
+    #[test]
+    fn read_bytes_stops_on_empty() {
+        let mut receiver = ScriptedReceiver {
+            next: Vec::from([Some(Ok(0x11)), Some(Ok(0x22)), None]),
+        };
+        let mut buffer = [0; 4];
+
+        let read = receiver.read_bytes(&mut buffer).unwrap();
+
+        assert_eq!(read, 2);
+        assert_eq!(&buffer[..read], [0x11, 0x22]);
+    }
+
+    #[test]
+    fn read_bytes_reports_partial_error() {
+        let mut receiver = ScriptedReceiver {
+            next: Vec::from([
+                Some(Ok(0x11)),
+                Some(Ok(0x22)),
+                Some(Err(TransferError::Parity)),
+            ]),
+        };
+        let mut buffer = [0; 4];
+
+        let err = receiver.read_bytes(&mut buffer).unwrap_err();
+
+        assert_eq!(err.bytes_transferred, 2);
+        assert_eq!(err.kind, TransferError::Parity);
+        assert_eq!(&buffer[..err.bytes_transferred], [0x11, 0x22]);
     }
 }

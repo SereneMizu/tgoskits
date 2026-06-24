@@ -15,7 +15,9 @@ use ax_runtime::hal::{
     paging::{MappingFlags, PageSize, PageTable, PageTableCursor},
     trap::PageFaultFlags,
 };
-use ax_sync::Mutex;
+use ax_sync::{LockdepMutexExt, Mutex};
+
+use crate::mm::ProcessVmStat;
 
 mod backend;
 
@@ -47,6 +49,9 @@ pub struct AddrSpace {
     /// transient clones from `ProcessData::aspace()` and is not reliable for
     /// SMP teardown decisions.
     pub(crate) process_slots: AtomicUsize,
+    /// All VmX counters for this address space.  Maintained automatically by
+    /// `map`, `unmap`, `clear`, and `try_clone`; never touch from outside mm/.
+    pub vm_stat: ProcessVmStat,
 }
 
 impl AddrSpace {
@@ -92,6 +97,7 @@ impl AddrSpace {
             areas: MemorySet::new(),
             pt: PageTable::try_new().map_err(|_| AxError::NoMemory)?,
             process_slots: AtomicUsize::new(0),
+            vm_stat: ProcessVmStat::new(),
         })
     }
 
@@ -155,6 +161,7 @@ impl AddrSpace {
             Backend::new_linear(start_vaddr, offset, false),
         );
         self.areas.map(area, &mut self.pt, false)?;
+        self.vm_stat.on_map((size / PAGE_SIZE_4K) as u64);
         Ok(())
     }
 
@@ -170,6 +177,7 @@ impl AddrSpace {
 
         let area = MemoryArea::new(start, size, flags, backend);
         self.areas.map(area, &mut self.pt, false)?;
+        self.vm_stat.on_map((size / PAGE_SIZE_4K) as u64);
         if populate {
             self.populate_area(start, size, flags)?;
         }
@@ -223,6 +231,60 @@ impl AddrSpace {
         Ok(())
     }
 
+    /// Discards the physical pages backing `[start, start+size)` while keeping
+    /// the VMA metadata intact (Linux `MADV_DONTNEED` / `MADV_FREE` semantics).
+    ///
+    /// For every anonymous private (`CowBackend`) area overlapping the range,
+    /// the intersection (clamped *inward* to the backend's page size) is handed
+    /// to the backend's existing `unmap`, which clears the PTEs and decrements
+    /// the `FRAME_TABLE` refcounts so freed frames return to the global
+    /// allocator. The `MemoryArea` is NOT removed, so the next access re-faults
+    /// and `CowBackend::populate` re-allocates a fresh zero page. Without this,
+    /// Go's runtime `madvise(MADV_DONTNEED)` is a no-op and committed frames
+    /// accumulate until OOM (etcd/consul/minio/prometheus/grafana on starry).
+    ///
+    /// Non-anonymous / non-CoW backends (file-backed, MAP_SHARED, linear device
+    /// memory) are skipped: their frames are not owned per-VMA and dropping
+    /// their PTEs has no reclaim benefit while risking an un-repopulatable hole.
+    pub fn discard_range(&mut self, start: VirtAddr, size: usize) -> AxResult {
+        self.validate_region(start, size)?;
+        let end = start + size;
+
+        // Collect (clamped, page-aligned) fragments + backend clones first, so
+        // the immutable `self.areas` borrow is released before we take the
+        // mutable page-table cursor (mirrors `areas_in_range`).
+        let mut frags: alloc::vec::Vec<(VirtAddrRange, Backend)> = alloc::vec::Vec::new();
+        for area in self.areas.iter() {
+            if area.start() >= end {
+                break;
+            }
+            if area.end() <= start {
+                continue;
+            }
+            // Only anonymous private mappings (Go's heap). See doc comment.
+            let backend = match area.backend() {
+                Backend::Cow(cow) if cow.is_anonymous() => area.backend().clone(),
+                _ => continue,
+            };
+            let page = backend.page_size();
+            // Clamp inward to whole backend-sized pages fully inside the range
+            // (`pages_in`/`DynPageIter` require both ends aligned, else EINVAL).
+            let frag_start = area.start().max(start).align_up(page);
+            let frag_end = area.end().min(end).align_down(page);
+            if frag_start >= frag_end {
+                continue;
+            }
+            frags.push((VirtAddrRange::new(frag_start, frag_end), backend));
+        }
+
+        for (range, backend) in frags {
+            let mut cursor = self.pt.cursor();
+            BackendOps::unmap(&backend, range, &mut cursor)?;
+        }
+
+        Ok(())
+    }
+
     /// Removes mappings within the specified virtual address range.
     ///
     /// Returns an error if the address range is out of the address space or not
@@ -230,8 +292,22 @@ impl AddrSpace {
     pub fn unmap(&mut self, start: VirtAddr, size: usize) -> AxResult {
         self.validate_region(start, size)?;
 
+        // Compute the actual mapped bytes being removed (unmap is already O(n)).
+        let end = start + size;
+        let removed_pages: u64 = self
+            .areas
+            .iter()
+            .filter(|a| a.start() < end && a.end() > start)
+            .map(|a| {
+                let lo = a.start().max(start);
+                let hi = a.end().min(end);
+                ((hi - lo) / PAGE_SIZE_4K) as u64
+            })
+            .sum();
+
         crate::syscall::memfd_on_aspace_unmap_range(self, start, size);
         self.areas.unmap(start, size, &mut self.pt)?;
+        self.vm_stat.on_unmap(removed_pages);
         Ok(())
     }
 
@@ -239,8 +315,21 @@ impl AddrSpace {
     pub fn unmap_metadata(&mut self, start: VirtAddr, size: usize) -> AxResult {
         self.validate_region(start, size)?;
 
+        let end = start + size;
+        let removed_pages: u64 = self
+            .areas
+            .iter()
+            .filter(|a| a.start() < end && a.end() > start)
+            .map(|a| {
+                let lo = a.start().max(start);
+                let hi = a.end().min(end);
+                ((hi - lo) / PAGE_SIZE_4K) as u64
+            })
+            .sum();
+
         crate::syscall::memfd_on_aspace_unmap_range(self, start, size);
         self.areas.unmap_metadata(start, size)?;
+        self.vm_stat.on_unmap(removed_pages);
         Ok(())
     }
 
@@ -315,6 +404,7 @@ impl AddrSpace {
         }
         self.areas
             .extend_area(addr, additional_size, &mut self.pt)?;
+        self.vm_stat.on_map((additional_size / PAGE_SIZE_4K) as u64);
         Ok(())
     }
 
@@ -390,6 +480,7 @@ impl AddrSpace {
     pub fn clear(&mut self) {
         crate::syscall::memfd_release_all_shared_writable_counts_for_aspace(self);
         self.areas.clear(&mut self.pt).unwrap();
+        self.vm_stat.on_clear();
     }
 
     /// Checks whether an access to the specified memory region is valid.
@@ -441,8 +532,22 @@ impl AddrSpace {
             let flags = area.flags();
             if flags.contains(access_flags) {
                 let page_size = area.backend().page_size();
+                // Readahead: populate a window FORWARD from the faulting page
+                // (clamped to this area), so a large file-backed mapping loads
+                // via the backend's batched read instead of one fault+read per
+                // page. The backend skips already-mapped pages, so overlapping
+                // windows from successive faults are harmless. Only base 4K pages
+                // get the window; huge pages populate exactly one.
+                let fault_page = vaddr.align_down(page_size);
+                let ps = page_size as usize;
+                const READAHEAD_PAGES: usize = 32;
+                let win_end = if page_size == PageSize::Size4K {
+                    (fault_page + READAHEAD_PAGES * ps).min(area.end())
+                } else {
+                    fault_page + ps
+                };
                 let populate_result = area.backend().populate(
-                    VirtAddrRange::from_start_size(vaddr.align_down(page_size), page_size as _),
+                    VirtAddrRange::new(fault_page, win_end),
                     flags,
                     access_flags,
                     &mut self.pt.cursor(),
@@ -482,7 +587,7 @@ impl AddrSpace {
         let new_aspace = Arc::new(Mutex::new(Self::new_empty(self.base(), self.size())?));
         let new_aspace_clone = new_aspace.clone();
 
-        let mut guard = new_aspace.lock();
+        let mut guard = new_aspace.lock_nested(1);
 
         let mut self_modify = self.pt.cursor();
         for area in self.areas.iter() {
@@ -502,6 +607,11 @@ impl AddrSpace {
             }
             crate::syscall::memfd_on_after_map(&guard, start);
         }
+        // Seed the child's vm_stat from the parent: the child's address space
+        // is a copy of the parent's, so its current VSS equals the parent's,
+        // and its starting watermarks inherit the parent's peaks (Linux fork
+        // semantics: child mm->hiwater_vm = parent mm->total_vm at fork time).
+        guard.vm_stat.seed_from(&self.vm_stat);
         drop(guard);
 
         Ok(new_aspace)

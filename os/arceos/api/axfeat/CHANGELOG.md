@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22](https://github.com/rcore-os/tgoskits/compare/ax-feat-v0.5.21...ax-feat-v0.5.22) - 2026-06-23
+
+### Other
+
+- updated the following local packages: ax-hal, ax-net, ax-runtime, ax-kspin, axbacktrace, ax-alloc, ax-driver, ax-ipi, ax-task, ax-sync, ax-display, ax-fs-ng, ax-input, ax-log
+
+## [0.5.21](https://github.com/rcore-os/tgoskits/compare/ax-feat-v0.5.20...ax-feat-v0.5.21) - 2026-06-22
+
+### Added
+
+- *(axruntime)* add compiler-backed stack protector support ([#1239](https://github.com/rcore-os/tgoskits/pull/1239))
+- AIC8800 Wi-Fi SoftAP for SG2002 (LicheeRV Nano) ([#1185](https://github.com/rcore-os/tgoskits/pull/1185))
+
+### Other
+
+- *(ax-runtime)* adapt submit-poll fs block irq registration ([#1228](https://github.com/rcore-os/tgoskits/pull/1228))
+
+## [0.5.20](https://github.com/rcore-os/tgoskits/compare/ax-feat-v0.5.19...ax-feat-v0.5.20) - 2026-06-12
+
+### Added
+
+- *(axruntime)* add runtime IRQ registration adapters
+
+### Other
+
+- *(ax-net)* unify network stack into single net/ax-net crate, r… ([#1203](https://github.com/rcore-os/tgoskits/pull/1203))
+
+## [0.5.19](https://github.com/rcore-os/tgoskits/compare/ax-feat-v0.5.18...ax-feat-v0.5.19) - 2026-06-11
+
+### Other
+
+- updated the following local packages: ax-alloc, ax-driver, ax-config, ax-hal, ax-task, ax-fs-ng, ax-ipi, ax-sync, ax-display, ax-fs, ax-input, ax-net-ng, ax-net, ax-runtime
+
 ## [0.5.18](https://github.com/rcore-os/tgoskits/compare/ax-feat-v0.5.17...ax-feat-v0.5.18) - 2026-06-09
 
 ### Added

@@ -1,8 +1,7 @@
-env = {AX_IP = "10.0.2.15", AX_GW = "10.0.2.2"}
 features = [
   "ax-feat/display",
   "ax-feat/rtc",
-  "ax-driver/virtio-blk",
+  "ax-driver/nvme",
   "ax-driver/virtio-net",
   "ax-driver/virtio-gpu",
   "ax-driver/virtio-input",
@@ -12,5 +11,4 @@ features = [
 ]
 max_cpu_num = 4
 log = "Warn"
-plat_dyn = true
 target = "aarch64-unknown-none-softfloat"

@@ -89,7 +89,7 @@ pub fn dcache_range(op: DCacheOp, addr: *const u8, size: usize) {
 
 /// 物理RAM实际转换为的内核虚拟地址
 pub fn phys_to_virt(paddr: usize) -> *mut u8 {
-    if mmu::is_mmu_enabled() {
+    if mmu::is_kernel_relocated() {
         if kimage_range().contains(&paddr) {
             __kimage_va(paddr)
         } else if percpu_range().contains(&paddr) {
@@ -97,6 +97,8 @@ pub fn phys_to_virt(paddr: usize) -> *mut u8 {
         } else {
             __va(paddr)
         }
+    } else if cfg!(target_arch = "loongarch64") {
+        __va(paddr)
     } else {
         paddr as *mut u8
     }
@@ -107,7 +109,7 @@ pub fn virt_to_phys(vaddr: *const u8) -> usize {
 }
 
 pub(crate) fn _fixmap_io(paddr: usize) -> *mut u8 {
-    if mmu::is_mmu_enabled() {
+    if mmu::is_kernel_relocated() {
         __io(paddr)
     } else {
         paddr as *mut u8

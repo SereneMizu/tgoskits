@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5](https://github.com/rcore-os/tgoskits/compare/ax-alloc-v0.8.4...ax-alloc-v0.8.5) - 2026-06-23
+
+### Other
+
+- updated the following local packages: ax-plat, ax-kspin, axbacktrace
+
+## [0.8.4](https://github.com/rcore-os/tgoskits/compare/ax-alloc-v0.8.3...ax-alloc-v0.8.4) - 2026-06-22
+
+### Other
+
+- updated the following local packages: ax-plat
+
+## [0.8.3](https://github.com/rcore-os/tgoskits/compare/ax-alloc-v0.8.2...ax-alloc-v0.8.3) - 2026-06-12
+
+### Other
+
+- updated the following local packages: ax-plat
+
+## [0.8.2](https://github.com/rcore-os/tgoskits/compare/ax-alloc-v0.8.1...ax-alloc-v0.8.2) - 2026-06-11
+
+### Fixed
+
+- *(kernel)* harden early allocation and virtio PCI setup
+
 ## [0.8.1](https://github.com/rcore-os/tgoskits/compare/ax-alloc-v0.8.0...ax-alloc-v0.8.1) - 2026-06-09
 
 ### Added

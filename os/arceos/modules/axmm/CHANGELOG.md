@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.21](https://github.com/rcore-os/tgoskits/compare/ax-mm-v0.5.20...ax-mm-v0.5.21) - 2026-06-23
+
+### Other
+
+- updated the following local packages: ax-hal, ax-kspin, ax-alloc
+
+## [0.5.20](https://github.com/rcore-os/tgoskits/compare/ax-mm-v0.5.19...ax-mm-v0.5.20) - 2026-06-22
+
+### Other
+
+- updated the following local packages: ax-hal, ax-alloc
+
+## [0.5.19](https://github.com/rcore-os/tgoskits/compare/ax-mm-v0.5.18...ax-mm-v0.5.19) - 2026-06-12
+
+### Other
+
+- updated the following local packages: ax-hal, ax-alloc
+
+## [0.5.18](https://github.com/rcore-os/tgoskits/compare/ax-mm-v0.5.17...ax-mm-v0.5.18) - 2026-06-11
+
+### Fixed
+
+- *(starry)* support eBPF ringbuf mmap on LoongArch DMW ([#1208](https://github.com/rcore-os/tgoskits/pull/1208))
+
 ## [0.5.17](https://github.com/rcore-os/tgoskits/compare/ax-mm-v0.5.16...ax-mm-v0.5.17) - 2026-06-09
 
 ### Other

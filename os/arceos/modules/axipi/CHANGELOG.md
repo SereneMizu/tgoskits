@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.20](https://github.com/rcore-os/tgoskits/compare/ax-ipi-v0.5.19...ax-ipi-v0.5.20) - 2026-06-23
+
+### Other
+
+- updated the following local packages: ax-hal, ax-kspin
+
+## [0.5.19](https://github.com/rcore-os/tgoskits/compare/ax-ipi-v0.5.18...ax-ipi-v0.5.19) - 2026-06-22
+
+### Other
+
+- updated the following local packages: ax-hal, ax-config
+
+## [0.5.18](https://github.com/rcore-os/tgoskits/compare/ax-ipi-v0.5.17...ax-ipi-v0.5.18) - 2026-06-12
+
+### Fixed
+
+- *(axruntime)* ensure aarch64 SMP IPI readiness before app init ([#1196](https://github.com/rcore-os/tgoskits/pull/1196))
+
+## [0.5.17](https://github.com/rcore-os/tgoskits/compare/ax-ipi-v0.5.16...ax-ipi-v0.5.17) - 2026-06-11
+
+### Other
+
+- updated the following local packages: ax-config, ax-hal
+
 ## [0.5.16](https://github.com/rcore-os/tgoskits/compare/ax-ipi-v0.5.15...ax-ipi-v0.5.16) - 2026-06-09
 
 ### Other

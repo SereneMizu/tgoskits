@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/rcore-os/tgoskits/compare/somehal-v0.7.1...somehal-v0.7.2) - 2026-06-23
+
+### Fixed
+
+- *(platform)* support AArch64 HVF timer boot ([#1334](https://github.com/rcore-os/tgoskits/pull/1334))
+
+## [0.7.1](https://github.com/rcore-os/tgoskits/compare/somehal-v0.7.0...somehal-v0.7.1) - 2026-06-22
+
+### Added
+
+- *(ax-runtime)* prefer UEFI RTC on dynamic platform ([#1294](https://github.com/rcore-os/tgoskits/pull/1294))
+
+### Fixed
+
+- *(somehal)* send x86 helper IPI on IPI vector ([#1297](https://github.com/rcore-os/tgoskits/pull/1297))
+
+## [0.7.0](https://github.com/rcore-os/tgoskits/compare/somehal-v0.6.10...somehal-v0.7.0) - 2026-06-12
+
+### Fixed
+
+- *(ci)* stabilize x86 Starry QEMU timing ([#1245](https://github.com/rcore-os/tgoskits/pull/1245))
+- *(axruntime)* ensure aarch64 SMP IPI readiness before app init ([#1196](https://github.com/rcore-os/tgoskits/pull/1196))
+- *(somehal)* route LoongArch ACPI GSIs through PCH-PIC
+- *(loongarch64)* ack timer irq before dispatch ([#1222](https://github.com/rcore-os/tgoskits/pull/1222))
+
+### Other
+
+- *(irq)* carry ACPI IRQ routing metadata
+- *(rdrive)* carry probe context and PCI INTx routes
+
+## [0.6.10](https://github.com/rcore-os/tgoskits/compare/somehal-v0.6.9...somehal-v0.6.10) - 2026-06-11
+
+### Added
+
+- *(somehal)* support dynamic CPU and interrupt hooks
+
 ## [0.6.9](https://github.com/rcore-os/tgoskits/compare/somehal-v0.6.8...somehal-v0.6.9) - 2026-06-09
 
 ### Added

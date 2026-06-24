@@ -110,16 +110,12 @@ pub(crate) fn monotonic_time_nanos() -> u64 {
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn handle_host_irq(vector: usize) -> Option<usize> {
-    let guard = ax_kernel_guard::NoPreempt::new();
-    let handled = modules::ax_hal::irq::handle(vector);
-
-    drop(guard);
-    handled
+    modules::ax_hal::irq::handle_irq(vector).then_some(vector)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
 pub(crate) fn dispatch_host_irq(vector: usize) {
-    modules::ax_hal::trap::irq_handler(vector);
+    modules::ax_hal::irq::handle_irq(vector);
 }
 
 impl HostCpu for ArceOsHost {
@@ -220,7 +216,7 @@ pub(crate) fn phys_to_virt(paddr: ax_memory_addr::PhysAddr) -> ax_memory_addr::V
 
 #[cfg(all(any(feature = "fs", feature = "host-fs"), target_arch = "x86_64"))]
 pub(crate) fn shutdown_host_filesystems() -> AxResult {
-    modules::ax_fs::shutdown_filesystems()
+    modules::ax_fs_ng::shutdown_filesystems()
 }
 
 #[cfg(target_arch = "x86_64")]

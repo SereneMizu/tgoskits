@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use rdif_intc::Intc;
-use rdrive::{PlatformDevice, module_driver, probe::OnProbeError, register::FdtInfo};
+use rdrive::{module_driver, probe::OnProbeError, register::ProbeFdt};
 
 static mut TIMER_IRQ: Option<rdrive::IrqId> = None;
 static mut TIMER_IRQ_PARENT: Option<rdrive::DeviceId> = None;
@@ -29,19 +29,15 @@ pub(crate) fn setup_systick_irq() {
     crate::irq::irq_set_enable(id, true);
 }
 
-fn probe(fdt: FdtInfo<'_>, dev: PlatformDevice) -> Result<(), OnProbeError> {
+fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
+    let (fdt, dev) = probe.into_parts();
     let intc_id = dev.descriptor.irq_parent.unwrap();
 
     let mut intc = rdrive::get::<Intc>(intc_id).unwrap().lock().unwrap();
     let interrupts = fdt.interrupts();
 
-    let irq = {
-        #[cfg(not(feature = "hv"))]
-        let irq_idx = 1;
-        #[cfg(feature = "hv")]
-        let irq_idx = 3;
-        &interrupts[irq_idx].specifier
-    };
+    let irq_idx = someboot::timer::aarch64_timer_irq_index(someboot::timer::aarch64_timer_mode());
+    let irq = &interrupts[irq_idx].specifier;
     TIMER_IRQ_VEC.call_once(|| irq.to_vec());
     let irq = intc.setup_irq_by_fdt(irq);
     debug!("Armv8 timer irq: {:?}", irq);

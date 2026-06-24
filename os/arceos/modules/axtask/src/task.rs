@@ -106,6 +106,8 @@ pub struct TaskInner {
     #[cfg(feature = "preempt")]
     need_resched: AtomicBool,
     #[cfg(feature = "preempt")]
+    force_resched: AtomicBool,
+    #[cfg(feature = "preempt")]
     preempt_disable_count: AtomicUsize,
 
     interrupted: AtomicBool,
@@ -202,6 +204,7 @@ impl TaskInner {
     /// Wait for the task to exit, and return the exit code.
     ///
     /// It will return immediately if the task has already exited (but not dropped).
+    #[track_caller]
     pub fn join(&self) -> i32 {
         crate::api::might_sleep();
         self.wait_for_exit
@@ -361,6 +364,8 @@ impl TaskInner {
             #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
+            force_resched: AtomicBool::new(false),
+            #[cfg(feature = "preempt")]
             preempt_disable_count: AtomicUsize::new(0),
             interrupted: AtomicBool::new(false),
             interrupt_waker: AtomicWaker::new(),
@@ -490,6 +495,36 @@ impl TaskInner {
 
     #[inline]
     #[cfg(feature = "preempt")]
+    pub(crate) fn set_force_resched_pending(&self, pending: bool) {
+        self.force_resched.store(pending, Ordering::Release)
+    }
+
+    #[inline]
+    #[cfg(feature = "preempt")]
+    fn force_resched_pending(&self) -> bool {
+        self.force_resched.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    #[cfg(all(test, feature = "preempt"))]
+    pub(crate) fn preempt_pending_for_test(&self) -> bool {
+        self.need_resched.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    #[cfg(all(test, feature = "preempt"))]
+    pub(crate) fn force_resched_pending_for_test(&self) -> bool {
+        self.force_resched_pending()
+    }
+
+    #[inline]
+    #[cfg(feature = "preempt")]
+    fn take_force_resched_pending(&self) -> bool {
+        self.force_resched.swap(false, Ordering::AcqRel)
+    }
+
+    #[inline]
+    #[cfg(feature = "preempt")]
     pub(crate) fn preempt_count(&self) -> usize {
         self.preempt_disable_count.load(Ordering::Acquire)
     }
@@ -519,11 +554,17 @@ impl TaskInner {
     fn current_check_preempt_pending() {
         use ax_kernel_guard::NoPreemptIrqSave;
         let curr = crate::current();
-        if curr.need_resched.load(Ordering::Acquire) && curr.can_preempt(0) {
+        if (curr.force_resched_pending() || curr.need_resched.load(Ordering::Acquire))
+            && curr.can_preempt(0)
+        {
             // Note: if we want to print log msg during `preempt_resched`, we have to
             // disable preemption here, because the ax-log may cause preemption.
             let mut rq = crate::current_run_queue::<NoPreemptIrqSave>();
-            if curr.need_resched.load(Ordering::Acquire) {
+            if curr.take_force_resched_pending() {
+                #[cfg(all(feature = "smp", feature = "ipi"))]
+                crate::run_queue::clear_remote_reschedule_pending_for_current_cpu();
+                rq.force_resched()
+            } else if curr.need_resched.load(Ordering::Acquire) {
                 rq.preempt_resched()
             }
         }
@@ -815,7 +856,11 @@ fn flush_stack_guard_tlb(vaddr: VirtAddr) {
     while ack_count.load(Ordering::Acquire) != remote_cpu_count {
         core::hint::spin_loop();
         if ax_hal::time::monotonic_time_nanos() - start > MAX_WAIT_NS {
-            panic!("task stack guard page TLB shootdown timeout");
+            let acked = ack_count.load(Ordering::Acquire);
+            panic!(
+                "task stack guard page TLB shootdown timeout: CPU {current_cpu} got \
+                 {acked}/{remote_cpu_count} ack(s) for vaddr={vaddr:#x}"
+            );
         }
     }
 }
@@ -964,7 +1009,7 @@ extern "C" fn task_entry() -> ! {
         crate::run_queue::clear_prev_task_on_cpu();
     }
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
-    #[cfg(feature = "irq")]
+    #[cfg(all(feature = "irq", not(feature = "host-test")))]
     ax_hal::asm::enable_irqs();
     let task = crate::current();
     if let Some(entry) = task.entry.take() {

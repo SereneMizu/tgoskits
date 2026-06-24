@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5](https://github.com/rcore-os/tgoskits/compare/axplat-dyn-v0.7.4...axplat-dyn-v0.7.5) - 2026-06-23
+
+### Added
+
+- *(starry)* support reboot syscall ([#1358](https://github.com/rcore-os/tgoskits/pull/1358))
+
+### Fixed
+
+- *(platform)* support AArch64 HVF timer boot ([#1334](https://github.com/rcore-os/tgoskits/pull/1334))
+
+## [0.7.4](https://github.com/rcore-os/tgoskits/compare/axplat-dyn-v0.7.3...axplat-dyn-v0.7.4) - 2026-06-22
+
+### Added
+
+- *(ax-runtime)* prefer UEFI RTC on dynamic platform ([#1294](https://github.com/rcore-os/tgoskits/pull/1294))
+
+## [0.7.3](https://github.com/rcore-os/tgoskits/compare/axplat-dyn-v0.7.2...axplat-dyn-v0.7.3) - 2026-06-12
+
+### Fixed
+
+- *(ci)* stabilize x86 Starry QEMU timing ([#1245](https://github.com/rcore-os/tgoskits/pull/1245))
+
+## [0.7.2](https://github.com/rcore-os/tgoskits/compare/axplat-dyn-v0.7.1...axplat-dyn-v0.7.2) - 2026-06-11
+
+### Added
+
+- *(somehal)* support dynamic CPU and interrupt hooks
+
 ## [0.7.1](https://github.com/rcore-os/tgoskits/compare/axplat-dyn-v0.7.0...axplat-dyn-v0.7.1) - 2026-06-09
 
 ### Added

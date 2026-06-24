@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.8.0...ax-runtime-v0.8.1) - 2026-06-23
+
+### Fixed
+
+- *(platform)* support AArch64 HVF timer boot ([#1334](https://github.com/rcore-os/tgoskits/pull/1334))
+
+### Other
+
+- *(ax-net)* add locking and concurrency documentation and remove deprecated interfaces ([#1340](https://github.com/rcore-os/tgoskits/pull/1340))
+
+## [0.8.0](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.7.0...ax-runtime-v0.8.0) - 2026-06-22
+
+### Added
+
+- *(ax-runtime)* prefer UEFI RTC on dynamic platform ([#1294](https://github.com/rcore-os/tgoskits/pull/1294))
+- *(ax-net)* add multi-interface support with per-interface routing, DNS, and SO_BINDTODEVICE ([#1244](https://github.com/rcore-os/tgoskits/pull/1244))
+- runtime Wi-Fi AP/STA mode switch for AIC8800 on SG2002 (LicheeRV Nano) ([#1266](https://github.com/rcore-os/tgoskits/pull/1266))
+- *(axruntime)* add compiler-backed stack protector support ([#1239](https://github.com/rcore-os/tgoskits/pull/1239))
+- AIC8800 Wi-Fi SoftAP for SG2002 (LicheeRV Nano) ([#1185](https://github.com/rcore-os/tgoskits/pull/1185))
+
+### Other
+
+- *(ax-runtime)* adapt submit-poll fs block irq registration ([#1228](https://github.com/rcore-os/tgoskits/pull/1228))
+
+## [0.7.0](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.6.2...ax-runtime-v0.7.0) - 2026-06-12
+
+### Added
+
+- *(ax-driver)* add dynamic platform rtc support ([#1242](https://github.com/rcore-os/tgoskits/pull/1242))
+- *(irq)* enhance IRQ request handling and state restoration logic
+- *(axruntime)* add runtime IRQ registration adapters
+
+### Fixed
+
+- *(starry)* reprogram timer for short deadlines ([#1250](https://github.com/rcore-os/tgoskits/pull/1250))
+- *(ci)* stabilize x86 Starry QEMU timing ([#1245](https://github.com/rcore-os/tgoskits/pull/1245))
+- *(axruntime)* ensure aarch64 SMP IPI readiness before app init ([#1196](https://github.com/rcore-os/tgoskits/pull/1196))
+
+### Other
+
+- *(ax-net)* unify network stack into single net/ax-net crate, r… ([#1203](https://github.com/rcore-os/tgoskits/pull/1203))
+
+## [0.6.2](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.6.1...ax-runtime-v0.6.2) - 2026-06-11
+
+### Other
+
+- updated the following local packages: ax-alloc, ax-driver, ax-config, ax-hal, ax-mm, ax-task, ax-fs-ng, ax-plat, axklib, ax-ipi, ax-display, ax-fs, ax-input, ax-net-ng, ax-net
+
 ## [0.6.1](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.6.0...ax-runtime-v0.6.1) - 2026-06-09
 
 ### Added
@@ -51,13 +99,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
-- updated the following local packages: ax-alloc, ax-driver, ax-task, ax-net-ng, axklib, ax-hal, ax-mm, ax-display, ax-fs, ax-fs-ng, ax-input, ax-ipi, ax-net
+- updated the following local packages: ax-alloc, ax-driver, ax-task, ax-net, axklib, ax-hal, ax-mm, ax-display, ax-fs, ax-fs-ng, ax-input, ax-ipi, ax-net
 
 ## [0.5.14](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.5.13...ax-runtime-v0.5.14) - 2026-05-15
 
 ### Other
 
-- updated the following local packages: axbacktrace, ax-alloc, ax-config, ax-hal, ax-mm, ax-fs, ax-fs-ng, ax-log, ax-net, ax-net-ng, ax-plat, ax-driver, ax-task, ax-display, ax-input, ax-ipi
+- updated the following local packages: axbacktrace, ax-alloc, ax-config, ax-hal, ax-mm, ax-fs, ax-fs-ng, ax-log, ax-net, ax-net, ax-plat, ax-driver, ax-task, ax-display, ax-input, ax-ipi
 
 ## [0.5.12](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.5.11...ax-runtime-v0.5.12) - 2026-04-27
 

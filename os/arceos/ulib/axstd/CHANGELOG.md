@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.21](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.20...ax-std-v0.5.21) - 2026-06-23
+
+### Other
+
+- updated the following local packages: ax-hal, ax-runtime, ax-api, ax-posix-api, ax-kspin, ax-alloc, ax-driver, ax-feat
+
+## [0.5.20](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.19...ax-std-v0.5.20) - 2026-06-22
+
+### Added
+
+- *(axruntime)* add compiler-backed stack protector support ([#1239](https://github.com/rcore-os/tgoskits/pull/1239))
+
+### Other
+
+- *(ax-runtime)* adapt submit-poll fs block irq registration ([#1228](https://github.com/rcore-os/tgoskits/pull/1228))
+
+## [0.5.19](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.18...ax-std-v0.5.19) - 2026-06-12
+
+### Fixed
+
+- *(axtask)* improve might_sleep diagnostics and coverage ([#1235](https://github.com/rcore-os/tgoskits/pull/1235))
+- *(axtask)* use monotonic deadlines for sleeps ([#1240](https://github.com/rcore-os/tgoskits/pull/1240))
+
+## [0.5.18](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.17...ax-std-v0.5.18) - 2026-06-11
+
+### Other
+
+- *(axvisor)* remove obsolete x86 q35 static platform ([#1186](https://github.com/rcore-os/tgoskits/pull/1186))
+
 ## [0.5.17](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.16...ax-std-v0.5.17) - 2026-06-09
 
 ### Added

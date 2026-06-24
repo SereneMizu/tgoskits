@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/rcore-os/tgoskits/compare/someboot-v0.2.2...someboot-v0.2.3) - 2026-06-23
+
+### Added
+
+- *(starry)* support reboot syscall ([#1358](https://github.com/rcore-os/tgoskits/pull/1358))
+
+### Fixed
+
+- *(platform)* support AArch64 HVF timer boot ([#1334](https://github.com/rcore-os/tgoskits/pull/1334))
+
+## [0.2.2](https://github.com/rcore-os/tgoskits/compare/someboot-v0.2.1...someboot-v0.2.2) - 2026-06-22
+
+### Added
+
+- *(ax-runtime)* prefer UEFI RTC on dynamic platform ([#1294](https://github.com/rcore-os/tgoskits/pull/1294))
+
+## [0.2.1](https://github.com/rcore-os/tgoskits/compare/someboot-v0.2.0...someboot-v0.2.1) - 2026-06-12
+
+### Added
+
+- *(ax-driver)* add dynamic platform rtc support ([#1242](https://github.com/rcore-os/tgoskits/pull/1242))
+
+### Fixed
+
+- *(ci)* stabilize x86 Starry QEMU timing ([#1245](https://github.com/rcore-os/tgoskits/pull/1245))
+
+### Other
+
+- *(someboot)* share linker script fragments ([#1218](https://github.com/rcore-os/tgoskits/pull/1218))
+
+## [0.2.0](https://github.com/rcore-os/tgoskits/compare/someboot-v0.1.17...someboot-v0.2.0) - 2026-06-11
+
+### Added
+
+- *(someboot)* boot LoongArch dynamic UEFI with SMP
+
+### Fixed
+
+- *(ax-plat-x86-pc)* enable XCR0 AVX/SSE state for userspace AVX ([#1112](https://github.com/rcore-os/tgoskits/pull/1112))
+- fix typos in code and comments across the codebase ([#1206](https://github.com/rcore-os/tgoskits/pull/1206))
+
 ## [0.1.17](https://github.com/rcore-os/tgoskits/compare/someboot-v0.1.16...someboot-v0.1.17) - 2026-06-09
 
 ### Added

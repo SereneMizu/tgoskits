@@ -15,7 +15,7 @@
 //! - `preempt`: Enable preemptive scheduling.
 //! - `sched-fifo`: Use the [FIFO cooperative scheduler][1]. It also enables the
 //!   `multitask` feature if it is enabled. This feature is enabled by default,
-//!   and it can be overriden by other scheduler features.
+//!   and it can be overridden by other scheduler features.
 //! - `sched-rr`: Use the [Round-robin preemptive scheduler][2]. It also enables
 //!   the `multitask` and `preempt` features if it is enabled.
 //! - `sched-cfs`: Use the [Completely Fair Scheduler][3]. It also enables the
@@ -71,6 +71,8 @@ cfg_if::cfg_if! {
         mod lockdep;
         #[cfg(feature = "tracepoint-hooks")]
         mod sched_tracepoint;
+        #[cfg(feature = "irq")]
+        mod irq_notify;
         mod wait_queue;
 
         #[cfg(feature = "irq")]
@@ -81,6 +83,8 @@ cfg_if::cfg_if! {
 
         #[cfg_attr(doc, doc(cfg(feature = "multitask")))]
         pub use self::api::*;
+        #[cfg(feature = "irq")]
+        pub use self::irq_notify::IrqNotify;
         pub use self::api::{sleep, sleep_until, yield_now};
         #[cfg(feature = "tracepoint-hooks")]
         pub use self::sched_tracepoint::SchedTracepoint;

@@ -18,7 +18,10 @@ use core::time::Duration;
 use dwmmc_host::DwMmc;
 use log::{info, warn};
 use rdif_clk::ClockId;
-use rdrive::{PlatformDevice, probe::OnProbeError, register::FdtInfo};
+use rdrive::{
+    probe::OnProbeError,
+    register::{FdtInfo, ProbeFdt},
+};
 use sdmmc_protocol::{
     Error, OperationPoll,
     error::Phase,
@@ -26,12 +29,14 @@ use sdmmc_protocol::{
 };
 
 use crate::{
-    block::{PlatformDeviceBlock, SharedDriver, decode_fdt_irq},
+    block::{
+        ProbeFdtBlock, SharedDriver,
+        sdmmc::{SdmmcBlockConfig, SdmmcBlockDevice},
+    },
     mmio::iomap,
     soc::scmi,
 };
 
-const BLOCK_SIZE: usize = 512;
 const DWMMC_STABLE_REFERENCE_CLOCK: u32 = 50_000_000;
 const ENABLE_SD_SPEED_SELECTION: bool = true;
 const RK3588_CRU_BASE: usize = 0xfd7c_0000;
@@ -45,10 +50,8 @@ const RK3588_SDMMC_SAMPLE_PHASE_CANDIDATES: [u32; 8] = [0, 45, 90, 135, 180, 225
 
 type RockchipDwMmc = SdioSdmmc<DwMmc>;
 
-mod block;
 mod phase;
 
-use block::SdBlockDevice;
 use phase::{init_rk3588_sdmmc_phase, tune_rk3588_sdmmc_sample_phase};
 
 crate::model_register!(
@@ -63,7 +66,8 @@ crate::model_register!(
     ],
 );
 
-fn probe(info: FdtInfo<'_>, plat_dev: PlatformDevice) -> Result<(), OnProbeError> {
+fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
+    let info = probe.info();
     let base_reg = info
         .node
         .regs()
@@ -84,15 +88,15 @@ fn probe(info: FdtInfo<'_>, plat_dev: PlatformDevice) -> Result<(), OnProbeError
     let mmio_base = iomap(base_reg.address as usize, mmio_size as usize)?;
 
     let mut host = unsafe { DwMmc::new(mmio_base) };
-    let reference_clock = dwmmc_reference_clock(&info);
+    let reference_clock = dwmmc_reference_clock(info);
     if let Some(reference_clock) = reference_clock {
         info!(
             "rockchip-dwmmc: using ciu reference clock {} Hz",
             reference_clock
         );
         host.set_reference_clock(reference_clock);
-        if is_rk3588_dwmmc(&info) {
-            init_rk3588_sdmmc_phase(&info, reference_clock)?;
+        if is_rk3588_dwmmc(info) {
+            init_rk3588_sdmmc_phase(info, reference_clock)?;
         }
     } else {
         warn!(
@@ -125,22 +129,18 @@ fn probe(info: FdtInfo<'_>, plat_dev: PlatformDevice) -> Result<(), OnProbeError
     );
 
     if let Some(reference_clock) = reference_clock
-        && is_rk3588_dwmmc(&info)
+        && is_rk3588_dwmmc(info)
     {
         tune_rk3588_sdmmc_sample_phase(&mut sd, reference_clock);
     }
 
-    let irq_num = decode_fdt_irq(&info.interrupts());
     let raw = SharedDriver::new(sd);
-    let dev = SdBlockDevice {
-        raw: Some(raw.clone()),
-        capacity_blocks: card_info.capacity_blocks.unwrap_or(0),
-        irq_enabled: core::sync::atomic::AtomicBool::new(false),
-        queue_created: false,
-        irq_handler_taken: false,
-    };
-    plat_dev.register_block_with_irq(dev, irq_num);
-    info!("rockchip-sd block device registered irq={:?}", irq_num);
+    let dev = SdmmcBlockDevice::new(
+        raw,
+        SdmmcBlockConfig::dma("rockchip-sd", card_info.capacity_blocks.unwrap_or(0), true),
+    );
+    let irq = probe.register_block(dev)?;
+    info!("rockchip-sd block device registered irq={:?}", irq);
     Ok(())
 }
 

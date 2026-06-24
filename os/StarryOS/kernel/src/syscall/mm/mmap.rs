@@ -1,7 +1,7 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use ax_errno::{AxError, AxResult};
-use ax_fs::{FileBackend, FileFlags};
+use ax_fs_ng::vfs::{FileBackend, FileFlags};
 use ax_memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange, align_up_4k};
 use ax_runtime::hal::paging::{MappingFlags, PageSize};
 use ax_task::current;
@@ -216,6 +216,7 @@ pub fn sys_mmap(
                 {
                     Ok(DeviceMmap::Physical(..))
                     | Ok(DeviceMmap::PhysicalResolved(..))
+                    | Ok(DeviceMmap::PhysicalPages(..))
                     | Ok(DeviceMmap::Cache(_)) => false,
                     Ok(DeviceMmap::None) | Err(_) => true,
                 }
@@ -246,19 +247,19 @@ pub fn sys_mmap(
         dst_addr
     } else {
         let align = page_size as usize;
+        // Defense-in-depth (#242): cap the search upper bound to
+        // `USER_STACK_TOP - STACK_GUARD_GAP` so a non-FIXED mmap (e.g. V8's
+        // 4 GiB PROT_NONE pointer-compression cage reservation) can never
+        // land in the slot immediately above the user stack. Linux uses an
+        // analogous `stack_guard_gap` (default 256 pages) in
+        // `mm/mmap.c::vma_compute_gap`. Explicit MAP_FIXED requests are
+        // unaffected.
+        const STACK_GUARD_GAP: usize = 0x10_0000; // 1 MiB
+        let upper = crate::config::USER_STACK_TOP.saturating_sub(STACK_GUARD_GAP);
+        let limit = VirtAddrRange::new(aspace.base(), VirtAddr::from(upper));
         aspace
-            .find_free_area(
-                VirtAddr::from(aligned),
-                length,
-                VirtAddrRange::new(aspace.base(), aspace.end()),
-                align,
-            )
-            .or(aspace.find_free_area(
-                aspace.base(),
-                length,
-                VirtAddrRange::new(aspace.base(), aspace.end()),
-                align,
-            ))
+            .find_free_area(VirtAddr::from(aligned), length, limit, align)
+            .or(aspace.find_free_area(aspace.base(), length, limit, align))
             .ok_or(AxError::NoMemory)?
     };
 
@@ -302,6 +303,7 @@ pub fn sys_mmap(
             );
             let populate = map_flags.contains(MmapFlags::POPULATE);
             aspace.map(start, map_length, ion_mapping_flags, populate, backend)?;
+            drop(aspace);
             info!(
                 "Ion buffer mmap success: vaddr=0x{:x}, length={}",
                 start.as_usize(),
@@ -350,6 +352,13 @@ pub fn sys_mmap(
                             }
                             None => Backend::new_linear(start, pa_va_offset, true),
                         }
+                    }
+                    Ok(DeviceMmap::PhysicalPages(pages, retain)) => {
+                        length = length.min(pages.len() * PAGE_SIZE_4K);
+                        Backend::new_shared(
+                            start,
+                            Arc::new(SharedPages::borrowed(pages, PageSize::Size4K, retain)?),
+                        )
                     }
                     Ok(DeviceMmap::None) => return Err(AxError::NoSuchDevice),
                     Ok(_) => return Err(AxError::InvalidInput),
@@ -427,6 +436,17 @@ pub fn sys_mmap(
                                             None => Backend::new_linear(start, pa_va_offset, true),
                                         }
                                     }
+                                    DeviceMmap::PhysicalPages(pages, retain) => {
+                                        length = length.min(pages.len() * PAGE_SIZE_4K);
+                                        Backend::new_shared(
+                                            start,
+                                            Arc::new(SharedPages::borrowed(
+                                                pages,
+                                                PageSize::Size4K,
+                                                retain,
+                                            )?),
+                                        )
+                                    }
                                     DeviceMmap::Cache(cache) => Backend::new_file(
                                         start,
                                         cache,
@@ -464,6 +484,7 @@ pub fn sys_mmap(
 
     let populate = map_flags.contains(MmapFlags::POPULATE);
     aspace.map(start, length, mapping_flags, populate, backend)?;
+    drop(aspace);
 
     Ok(start.as_usize() as _)
 }
@@ -826,17 +847,45 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
         _ => return Err(AxError::InvalidInput),
     }
 
+    // man 2 madvise: addr must be page-aligned.
     if !addr.is_multiple_of(PageSize::Size4K as usize) {
         return Err(AxError::InvalidInput);
     }
 
-    if length > 0 {
-        let curr = current();
-        let aspace_arc = curr.as_thread().proc_data.aspace();
-        let aspace = aspace_arc.lock();
-        if aspace.find_area(VirtAddr::from(addr)).is_none() {
-            return Err(AxError::NoMemory);
+    if length == 0 {
+        return Ok(0);
+    }
+
+    let curr = current();
+    let aspace_arc = curr.as_thread().proc_data.aspace();
+    let mut aspace = aspace_arc.lock();
+
+    // man 2 madvise ENOMEM: the WHOLE page-aligned range must be mapped, not just
+    // the first page. Checking only `find_area(addr)` lets a `[mapped][hole][mapped]`
+    // range succeed while `discard_range` silently skips the hole; Linux returns
+    // ENOMEM. An empty access mask makes `can_access_range` a pure contiguous-
+    // coverage check (every area's flags trivially contain the empty set).
+    if !aspace.can_access_range(
+        VirtAddr::from(addr),
+        align_up_4k(length),
+        MappingFlags::empty(),
+    ) {
+        return Err(AxError::NoMemory);
+    }
+
+    // MADV_DONTNEED: drop the pages now; next access re-faults to a fresh zero
+    // page (anon) / re-read (file CoW). MADV_FREE is lazy in Linux but a
+    // synchronous drop is a correct, conservative implementation (per man 2
+    // madvise the app must not rely on stale contents after MADV_FREE).
+    // Go's runtime relies on this to return idle heap spans — without it the
+    // committed working set grows until OOM. DONTNEED_LOCKED behaves like
+    // DONTNEED here (we do not honor mlock).
+    match advice as u32 {
+        MADV_DONTNEED | MADV_FREE | MADV_DONTNEED_LOCKED => {
+            let length = align_up_4k(length);
+            aspace.discard_range(VirtAddr::from(addr), length)?;
         }
+        _ => {}
     }
 
     Ok(0)
@@ -867,30 +916,29 @@ pub fn sys_msync(addr: usize, length: usize, flags: u32) -> AxResult<isize> {
 
     let curr = current();
     let aspace_arc = curr.as_thread().proc_data.aspace();
-    let mut aspace = aspace_arc.lock();
-
-    let mut cursor = start;
-    while cursor < end {
-        let (area_end, fb_info) = {
+    let writebacks: Vec<_> = {
+        let aspace = aspace_arc.lock();
+        let mut writebacks = Vec::new();
+        let mut cursor = start;
+        while cursor < end {
             let area = match aspace.find_area(cursor) {
                 Some(a) => a,
                 None => return Err(AxError::NoMemory),
             };
-            let fb_info = if let Backend::File(file_backend) = area.backend()
+            let range_start = area.start().max(start);
+            let range_end = area.end().min(end);
+            if let Backend::File(file_backend) = area.backend()
                 && file_backend.is_shared()
             {
-                Some((file_backend.clone(), area.flags()))
-            } else {
-                None
-            };
-            (area.end(), fb_info)
-        };
-
-        if let Some((file_backend, area_flags)) = fb_info {
-            file_backend.writeback_and_protect(&mut aspace, start, end, area_flags)?;
+                writebacks.push((file_backend.clone(), range_start, range_end));
+            }
+            cursor = area.end();
         }
+        writebacks
+    };
 
-        cursor = area_end;
+    for (file_backend, range_start, range_end) in writebacks {
+        file_backend.writeback_range(range_start, range_end)?;
     }
 
     Ok(0)

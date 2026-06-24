@@ -1,5 +1,5 @@
 #![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_main)]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 #[allow(unused_imports)]
@@ -43,13 +43,14 @@ pub(crate) mod fdt;
 pub mod irq;
 pub mod mem;
 pub mod power;
+pub mod rtc;
 pub mod smp;
 pub mod timer;
 
 pub use acpi::rsdp_addr_phys;
 pub use fdt::{fdt_addr, fdt_addr_phys};
 pub use page_table_generic::*;
-pub use somehal_macros::{entry, irq_handler, someboot_secondary_entry as secondary_entry};
+pub use somehal_macros::{entry, someboot_secondary_entry as secondary_entry};
 
 use crate::{
     irq::IrqId,
@@ -76,12 +77,20 @@ pub trait ArchTrait {
 
     fn post_allocator();
 
+    fn init_boot_tls() {}
+    fn init_runtime_percpu_reg(_cpu_idx: usize) {}
+
     fn per_cpu_trap_init(is_primary: bool);
     fn trap_addr() -> usize;
 
     fn virt_to_phys(vaddr: *const u8) -> usize;
 
     fn kernel_space() -> core::ops::Range<usize>;
+    fn is_kernel_relocated_at(addr: usize) -> bool {
+        (crate::consts::VM_LOAD_ADDRESS..usize::MAX).contains(&addr)
+    }
+
+    fn is_mmu_enabled() -> bool;
 
     fn kernel_page_table() -> PageTableInfo;
     fn set_kernel_page_table(val: PageTableInfo);
@@ -91,6 +100,9 @@ pub trait ArchTrait {
     fn set_user_page_table(val: PageTableInfo);
 
     fn shutdown() -> !;
+    fn reset() -> ! {
+        Self::shutdown()
+    }
     fn secondary_entry_fn_address() -> *const ();
     fn cpu_on(hartid: usize, entry: usize, arg: usize) -> Result<(), CpuOnError>;
 
@@ -176,9 +188,9 @@ fn prime_entry() -> ! {
     }
 
     let entry = __someboot_main as *const () as usize;
-    let sp = crate::smp::cpu_meta(crate::smp::early_current_cpu_idx())
-        .unwrap()
-        .stack_top;
+    let cpu_idx = crate::smp::early_current_cpu_idx();
+    arch::Arch::init_runtime_percpu_reg(cpu_idx);
+    let sp = crate::smp::cpu_meta(cpu_idx).unwrap().stack_top;
     let sp = __percpu(sp);
     println!(
         "Jumping to main entry point at {:#x} with SP {:#p}",

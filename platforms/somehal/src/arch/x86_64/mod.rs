@@ -2,19 +2,20 @@ use alloc::vec::Vec;
 
 use rdif_intc::{AcpiGsiRoute, AcpiIrqPolarity, AcpiIrqTrigger};
 use rdrive::{
-    DriverGeneric, PlatformDevice, module_driver,
+    DriverGeneric, module_driver,
     probe::{
         OnProbeError,
-        acpi::{AcpiId, AcpiInfo, AcpiIoApic},
+        acpi::{AcpiId, AcpiIoApic, ProbeAcpi},
     },
 };
 use x2apic::ioapic::{IoApic, IrqFlags, IrqMode};
 
-use crate::{common::PlatOp, irq::_handle_irq};
+use crate::common::PlatOp;
 
 pub struct Plat;
 
 const APIC_TIMER_VECTOR: usize = 0x20;
+const APIC_IPI_VECTOR: usize = 0xf3;
 const LAPIC_REG_EOI: u32 = 0x0b0;
 const LAPIC_REG_ICR_LOW: u32 = 0x300;
 const LAPIC_REG_ICR_HIGH: u32 = 0x310;
@@ -50,30 +51,43 @@ impl X86IoApicIntc {
     }
 
     fn remember_route(&mut self, route: AcpiGsiRoute) {
-        if let Some(existing) = self.routes.iter_mut().find(|r| r.vector == route.vector) {
+        if let Some(existing) = self.routes.iter_mut().find(|r| {
+            r.controller_id == route.controller_id
+                && r.controller_address == route.controller_address
+                && r.gsi == route.gsi
+        }) {
             *existing = route;
         } else {
             self.routes.push(route);
         }
     }
 
-    fn route_for_vector(&self, vector: usize) -> Option<AcpiGsiRoute> {
-        self.routes
+    fn routes_for_vector(&self, vector: usize) -> Vec<AcpiGsiRoute> {
+        let routes: Vec<_> = self
+            .routes
             .iter()
             .copied()
-            .find(|r| r.vector == vector)
-            .or_else(|| {
-                rdrive::probe::acpi::with_acpi(|system| system.routing().resolve_vector(vector))
-                    .flatten()
-            })
+            .filter(|r| r.vector == vector)
+            .collect();
+        if !routes.is_empty() {
+            return routes;
+        }
+
+        rdrive::probe::acpi::with_acpi(|system| system.routing().resolve_vector(vector))
+            .flatten()
+            .into_iter()
+            .collect()
     }
 
     fn set_vector_enable(&mut self, vector: usize, enable: bool) -> bool {
-        let Some(route) = self.route_for_vector(vector) else {
+        let routes = self.routes_for_vector(vector);
+        if routes.is_empty() {
             return false;
-        };
+        }
 
-        self.set_route_enable(&route, enable);
+        for route in routes {
+            self.set_route_enable(&route, enable);
+        }
         true
     }
 
@@ -129,8 +143,8 @@ impl X86IoApic {
     }
 
     fn contains_route(&self, route: &AcpiGsiRoute) -> bool {
-        self.info.id == route.controller_id
-            && self.info.address == route.controller_address
+        u16::from(self.info.id) == route.controller_id
+            && u64::from(self.info.address) == route.controller_address
             && self.contains(route.gsi)
     }
 
@@ -144,14 +158,12 @@ impl X86IoApic {
             let mut entry = self.ioapic.table_entry(input);
             entry.set_vector(route.vector as u8);
             entry.set_mode(IrqMode::Fixed);
-            entry.set_flags(intx_flags(route.trigger, route.polarity));
+            entry.set_flags(intx_flags(route.trigger, route.polarity) | IrqFlags::MASKED);
             entry.set_dest(0);
             self.ioapic.set_table_entry(input, entry);
 
             if enable {
                 self.ioapic.enable_irq(input);
-            } else {
-                self.ioapic.disable_irq(input);
             }
         }
     }
@@ -164,6 +176,14 @@ impl DriverGeneric for X86IoApicIntc {
 }
 
 impl rdif_intc::Interface for X86IoApicIntc {
+    fn supports_acpi_gsi(&self, route: &AcpiGsiRoute) -> bool {
+        route.controller == rdif_intc::AcpiGsiController::IoApic
+            && self
+                .ioapics
+                .iter()
+                .any(|ioapic| ioapic.contains_route(route))
+    }
+
     fn setup_irq_by_acpi(&mut self, route: &AcpiGsiRoute) -> rdrive::IrqId {
         self.remember_route(*route);
         self.set_route_enable(route, false);
@@ -171,7 +191,8 @@ impl rdif_intc::Interface for X86IoApicIntc {
     }
 }
 
-fn probe_ioapic(info: AcpiInfo<'_>, dev: PlatformDevice) -> Result<(), OnProbeError> {
+fn probe_ioapic(probe: ProbeAcpi<'_>) -> Result<(), OnProbeError> {
+    let (info, dev) = probe.into_parts();
     let ioapics = info.root.routing().io_apics();
     if ioapics.is_empty() {
         return Err(OnProbeError::NotMatch);
@@ -182,6 +203,8 @@ fn probe_ioapic(info: AcpiInfo<'_>, dev: PlatformDevice) -> Result<(), OnProbeEr
 }
 
 impl PlatOp for Plat {
+    type ActiveIrq = ActiveIrq;
+
     fn irq_set_enable(irq: rdrive::IrqId, enable: bool) {
         let raw = irq.raw();
 
@@ -218,20 +241,16 @@ impl PlatOp for Plat {
         }
     }
 
-    fn irq_handler() -> someboot::irq::IrqId {
-        someboot::irq::systimer_irq()
-    }
-
-    fn irq_handler_with_raw(raw: usize) -> Option<someboot::irq::IrqId> {
+    fn begin_irq(raw: usize) -> Option<Self::ActiveIrq> {
         if raw == APIC_TIMER_VECTOR {
-            _handle_irq(raw.into());
-            lapic_eoi();
-            return Some(someboot::irq::systimer_irq());
+            return Some(ActiveIrq::new(someboot::irq::systimer_irq().raw().into()));
         }
 
-        _handle_irq(raw.into());
-        lapic_eoi();
-        Some(someboot::irq::IrqId::new(raw))
+        Some(ActiveIrq::new(raw.into()))
+    }
+
+    fn active_irq_id(active: &Self::ActiveIrq) -> rdrive::IrqId {
+        active.id()
     }
 
     fn systick_irq() -> rdrive::IrqId {
@@ -246,9 +265,29 @@ impl PlatOp for Plat {
 
     fn send_ipi_to_cpu(cpu_id: usize) {
         Self::send_ipi(
-            APIC_TIMER_VECTOR.into(),
+            APIC_IPI_VECTOR.into(),
             crate::irq::IpiTarget::Other { cpu_id },
         );
+    }
+}
+
+pub struct ActiveIrq {
+    irq: rdrive::IrqId,
+}
+
+impl ActiveIrq {
+    const fn new(irq: rdrive::IrqId) -> Self {
+        Self { irq }
+    }
+
+    pub fn id(&self) -> rdrive::IrqId {
+        self.irq
+    }
+}
+
+impl Drop for ActiveIrq {
+    fn drop(&mut self) {
+        lapic_eoi();
     }
 }
 

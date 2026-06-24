@@ -14,12 +14,13 @@ mod pidfd;
 mod pipe;
 pub mod signalfd;
 pub mod timerfd;
+mod wext;
 
 use alloc::{borrow::Cow, sync::Arc};
 use core::{ffi::c_int, time::Duration};
 
 use ax_errno::{AxError, AxResult};
-use ax_fs::{FS_CONTEXT, FileBackend, FileFlags, OpenOptions};
+use ax_fs_ng::vfs::{FS_CONTEXT, FileBackend, FileFlags, OpenOptions};
 use ax_io::prelude::*;
 use ax_task::current;
 use axfs_ng_vfs::DeviceId;
@@ -33,7 +34,7 @@ use linux_raw_sys::general::{
 use spin::RwLock;
 
 pub use self::{
-    fs::{Directory, File, resolve_at, with_fs},
+    fs::{Directory, File, ResolveAtResult, resolve_at, with_fs},
     io_uring::IoUring,
     net::Socket,
     nsfd::NsFd,

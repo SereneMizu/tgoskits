@@ -48,6 +48,23 @@ fn write_board_to_build_config(build_config_path: &Path, board: &Board) -> anyho
             build_config_path.display()
         )
     })?;
+    copy_companion_its(&board.path, build_config_path)?;
+    Ok(())
+}
+
+fn copy_companion_its(src_config: &Path, dst_config: &Path) -> anyhow::Result<()> {
+    let src_its = src_config.with_extension("its");
+    if !src_its.exists() {
+        return Ok(());
+    }
+    let dst_its = dst_config.with_extension("its");
+    fs::copy(&src_its, &dst_its).map_err(|e| {
+        anyhow!(
+            "failed to copy Starry uImage ITS {} to {}: {e}",
+            src_its.display(),
+            dst_its.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -153,10 +170,8 @@ mod tests {
             "qemu-riscv64",
             r#"
 target = "riscv64gc-unknown-none-elf"
-env = { AX_IP = "10.0.2.15", AX_GW = "10.0.2.2" }
 features = ["ax-driver/serial", "ax-driver/virtio-blk"]
 log = "Warn"
-plat_dyn = true
 "#,
         );
         let existing_snapshot = StarryCommandSnapshot {
@@ -220,7 +235,6 @@ plat_dyn = true
             "qemu-aarch64",
             r#"
 target = "aarch64-unknown-none-softfloat"
-env = { AX_IP = "10.0.2.15", AX_GW = "10.0.2.2" }
 features = ["qemu"]
 log = "Warn"
 plat_dyn = false
@@ -236,6 +250,29 @@ plat_dyn = false
     }
 
     #[test]
+    fn write_defconfig_copies_companion_its_with_matching_output_basename() {
+        let root = tempdir().unwrap();
+        write_workspace(root.path());
+        let source = write_board(
+            root.path(),
+            "licheerv-nano-sg2002",
+            r#"
+target = "riscv64gc-unknown-none-elf"
+features = ["sg2002"]
+log = "Info"
+"#,
+        );
+        fs::write(source.with_extension("its"), "ITS_TEMPLATE").unwrap();
+
+        let build_config_path = write_defconfig(root.path(), "licheerv-nano-sg2002").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(build_config_path.with_extension("its")).unwrap(),
+            "ITS_TEMPLATE"
+        );
+    }
+
+    #[test]
     fn ensure_default_build_config_for_target_generates_missing_file_and_updates_snapshot() {
         let root = tempdir().unwrap();
         write_workspace(root.path());
@@ -244,10 +281,8 @@ plat_dyn = false
             "qemu-riscv64",
             r#"
 target = "riscv64gc-unknown-none-elf"
-env = { AX_IP = "10.0.2.15", AX_GW = "10.0.2.2" }
 features = ["ax-driver/serial", "ax-driver/virtio-blk"]
 log = "Warn"
-plat_dyn = true
 "#,
         );
         let existing_snapshot = StarryCommandSnapshot {
@@ -296,7 +331,6 @@ plat_dyn = true
             "qemu-aarch64",
             r#"
 target = "aarch64-unknown-none-softfloat"
-env = { AX_IP = "10.0.2.15", AX_GW = "10.0.2.2" }
 features = ["qemu"]
 log = "Warn"
 plat_dyn = false
@@ -305,7 +339,7 @@ plat_dyn = false
 
         let output = root.path().join("tmp/custom-starry.toml");
         fs::create_dir_all(output.parent().unwrap()).unwrap();
-        fs::write(&output, "plat_dyn = true\n").unwrap();
+        fs::write(&output, "log = \"Debug\"\n").unwrap();
 
         let board = ensure_default_build_config_for_target(
             root.path(),
@@ -315,6 +349,6 @@ plat_dyn = false
         .unwrap();
 
         assert!(board.is_none());
-        assert_eq!(fs::read_to_string(&output).unwrap(), "plat_dyn = true\n");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "log = \"Debug\"\n");
     }
 }

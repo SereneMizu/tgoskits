@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1](https://github.com/rcore-os/tgoskits/compare/rdrive-v0.23.0...rdrive-v0.23.1) - 2026-06-22
+
+### Added
+
+- *(starry)* add Wayland app case ([#1160](https://github.com/rcore-os/tgoskits/pull/1160))
+- *(ax-net)* add multi-interface support with per-interface routing, DNS, and SO_BINDTODEVICE ([#1244](https://github.com/rcore-os/tgoskits/pull/1244))
+
+## [0.23.0](https://github.com/rcore-os/tgoskits/compare/rdrive-v0.22.0...rdrive-v0.23.0) - 2026-06-12
+
+### Added
+
+- *(ax-driver)* add dynamic platform rtc support ([#1242](https://github.com/rcore-os/tgoskits/pull/1242))
+
+### Fixed
+
+- *(ci)* stabilize x86 Starry QEMU timing ([#1245](https://github.com/rcore-os/tgoskits/pull/1245))
+- *(somehal)* route LoongArch ACPI GSIs through PCH-PIC
+
+### Other
+
+- *(irq)* carry ACPI IRQ routing metadata
+- *(rdrive)* carry probe context and PCI INTx routes
+
 ## [0.22.0](https://github.com/rcore-os/tgoskits/compare/rdrive-v0.21.0...rdrive-v0.22.0) - 2026-06-09
 
 ### Added

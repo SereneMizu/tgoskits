@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6](https://github.com/rcore-os/tgoskits/compare/rockchip-npu-v0.2.5...rockchip-npu-v0.2.6) - 2026-06-23
+
+### Other
+
+- updated the following local packages: dma-api
+
+## [0.2.5](https://github.com/rcore-os/tgoskits/compare/rockchip-npu-v0.2.4...rockchip-npu-v0.2.5) - 2026-06-12
+
+### Other
+
+- updated the following local packages: rdif-base
+
+## [0.2.4](https://github.com/rcore-os/tgoskits/compare/rockchip-npu-v0.2.3...rockchip-npu-v0.2.4) - 2026-06-11
+
+### Added
+
+- *(orangepi-5-plus-uvc-rknn)* add RKNN bench validation ([#1189](https://github.com/rcore-os/tgoskits/pull/1189))
+
 ## [0.2.3](https://github.com/rcore-os/tgoskits/compare/rockchip-npu-v0.2.2...rockchip-npu-v0.2.3) - 2026-06-09
 
 ### Other

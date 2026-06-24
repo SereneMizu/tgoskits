@@ -1,12 +1,12 @@
 use ax_runtime::hal::cpu::uspace::{ExceptionInfo, ExceptionKind, ReturnReason, UserContext};
 use ax_task::TaskInner;
 use starry_process::Pid;
-use starry_signal::{SignalInfo, Signo};
+use starry_signal::{SEGV_ACCERR, SEGV_MAPERR, SignalInfo, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 use syscalls::Sysno;
 
 use super::{
-    AsThread, SyscallRestartInfo, SyscallTraceState, TimerState, check_signals,
+    AsThread, SyscallRestartInfo, SyscallTraceState, TimerState, check_signals, poll_process_timer,
     ptrace_stop_current, ptrace_syscall_stop_current, raise_signal_fatal, set_timer_state,
     unblock_next_signal, wait_existing_ptrace_stop_current,
 };
@@ -19,7 +19,7 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
             let curr = ax_task::current();
 
             if let Some(tid) = (set_child_tid as *mut Pid).nullable() {
-                tid.vm_write(curr.id().as_u64() as Pid).ok();
+                tid.vm_write(curr.as_thread().tid() as Pid).ok();
             }
 
             info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
@@ -36,7 +36,6 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                 if thr.proc_data.is_ptrace_singlestep_for(thr.tid())
                     && (thr.proc_data.is_ptrace_traceme() || thr.proc_data.is_ptrace_attached())
                 {
-                    #[cfg(target_arch = "riscv64")]
                     crate::syscall::ptrace_setup_singlestep(&thr.proc_data, thr.tid(), &mut uctx);
                 }
 
@@ -99,13 +98,36 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                         }
                     }
                     ReturnReason::PageFault(addr, flags) => {
-                        if !thr.proc_data.aspace().lock().handle_page_fault(addr, flags) {
-                            info!(
+                        // Classify si_code while holding the aspace lock: an
+                        // existing mapping that rejected the access is a
+                        // permission violation (SEGV_ACCERR), otherwise the
+                        // address is unmapped (SEGV_MAPERR) — matching Linux's
+                        // do_user_addr_fault().
+                        let si_code = {
+                            let aspace = thr.proc_data.aspace();
+                            let mut aspace = aspace.lock();
+                            if aspace.handle_page_fault(addr, flags) {
+                                None
+                            } else if aspace.find_area(addr).is_some() {
+                                Some(SEGV_ACCERR)
+                            } else {
+                                Some(SEGV_MAPERR)
+                            }
+                        };
+                        if let Some(si_code) = si_code {
+                            warn!(
                                 "{:?}: segmentation fault at {:#x} {:?}",
                                 thr.proc_data.proc, addr, flags
                             );
-                            raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGSEGV), &uctx)
-                                .expect("Failed to send SIGSEGV");
+                            // POSIX: a synchronous SIGSEGV must carry the
+                            // faulting address in si_addr so handlers can
+                            // classify and recover from guard-page / implicit-
+                            // null-check faults.
+                            raise_signal_fatal(
+                                SignalInfo::new_fault(Signo::SIGSEGV, si_code, addr.as_usize()),
+                                &uctx,
+                            )
+                            .expect("Failed to send SIGSEGV");
                         }
                     }
                     ReturnReason::Interrupt => {}
@@ -144,14 +166,26 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                             let saved_insn = thr.proc_data.take_ptrace_ss_saved_insn_for(thr.tid());
                             if let Some((addr, insn)) = saved_insn {
                                 if addr == uctx.ip() {
-                                    let aspace = thr.proc_data.aspace();
-                                    let aspace = aspace.lock();
-                                    let _ = aspace.write(
-                                        ax_memory_addr::VirtAddr::from_usize(addr),
-                                        &(insn as u16).to_ne_bytes(),
+                                    #[cfg(any(
+                                        target_arch = "riscv64",
+                                        target_arch = "aarch64",
+                                        target_arch = "loongarch64"
+                                    ))]
+                                    let _ = crate::syscall::ptrace_restore_singlestep_insn(
+                                        &thr.proc_data,
+                                        thr.tid(),
+                                        addr,
+                                        insn,
                                     );
-                                    #[cfg(target_arch = "riscv64")]
-                                    ax_runtime::hal::cpu::asm::flush_icache_all();
+                                    #[cfg(not(any(
+                                        target_arch = "riscv64",
+                                        target_arch = "aarch64",
+                                        target_arch = "loongarch64"
+                                    )))]
+                                    thr.proc_data.set_ptrace_ss_saved_insn_for(
+                                        thr.tid(),
+                                        Some((addr, insn)),
+                                    );
                                 } else {
                                     thr.proc_data.set_ptrace_ss_saved_insn_for(
                                         thr.tid(),
@@ -159,6 +193,28 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                                     );
                                 }
                             }
+                            if let Some(_resume_sig) =
+                                ptrace_stop_current(thr, Signo::SIGTRAP, &mut uctx)
+                            {
+                                break 'exc;
+                            }
+                        }
+                        // On x86_64, PTRACE_SINGLESTEP sets TF in RFLAGS;
+                        // the resulting #DB exception arrives here.
+                        // ExceptionKind::Debug and uctx.rflags only exist on
+                        // x86_64, so this whole block is arch-gated.
+                        #[cfg(target_arch = "x86_64")]
+                        if matches!(kind, ExceptionKind::Debug)
+                            && (thr.proc_data.is_ptrace_traceme()
+                                || thr.proc_data.is_ptrace_attached())
+                        {
+                            // Clear TF (bit 8) in the saved RFLAGS.  The Intel
+                            // SDM (Vol 3A §17.3.2) states the CPU clears TF
+                            // when delivering a TF-induced #DB, but QEMU may
+                            // not always honour this.  Clearing explicitly
+                            // prevents an unwanted extra single-step on resume.
+                            uctx.rflags &= !(1u64 << 8);
+                            thr.proc_data.set_ptrace_singlestep_for(thr.tid(), false);
                             if let Some(_resume_sig) =
                                 ptrace_stop_current(thr, Signo::SIGTRAP, &mut uctx)
                             {
@@ -209,6 +265,11 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                 }
 
                 if !unblock_next_signal() {
+                    // POSIX timers are also driven by the alarm task, but polling
+                    // here closes the window where an expired timer is only noticed
+                    // after the current syscall returns to userspace.
+                    poll_process_timer(thr.proc_data.proc.pid());
+
                     let eintr_code = -(ax_errno::LinuxError::EINTR.code() as isize);
                     let restart = if is_syscall
                         && (uctx.retval() as isize) == eintr_code

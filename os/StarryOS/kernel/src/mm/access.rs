@@ -32,6 +32,7 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
         ax_runtime::hal::cpu::asm::irqs_enabled(),
         "faultable user memory access requires IRQs enabled"
     );
+    might_sleep();
 
     let curr = current();
     let Some(thr) = curr.try_as_thread() else {
@@ -99,9 +100,9 @@ fn check_null_terminated<T: PartialEq + Default>(
             // it below.
             let ptr = unsafe { start.add(len) };
             while ptr as usize >= page.as_ptr() as usize {
-                // We cannot prepare `aspace` outside of the loop, since holding
-                // aspace requires a mutex which would be required on page
-                // fault, and page faults can trigger inside the loop.
+                // Prepare only the page containing the next byte so the
+                // volatile read below does not fault while the aspace lock is
+                // not held.
 
                 // TODO: this is inefficient, but we have to do this instead of
                 // querying the page table since the page might has not been
@@ -120,15 +121,15 @@ fn check_null_terminated<T: PartialEq + Default>(
                 if unsafe { aspace_arc.raw() }.is_owned_by_current() {
                     return Err(AxError::BadAddress);
                 }
-                let aspace = aspace_arc.lock();
+                let mut aspace = aspace_arc.lock();
                 if !aspace.can_access_range(page, PAGE_SIZE_4K, access_flags) {
                     return Err(AxError::BadAddress);
                 }
+                aspace.populate_area(page, PAGE_SIZE_4K, access_flags)?;
 
                 page += PAGE_SIZE_4K;
             }
 
-            // This might trigger a page fault
             // SAFETY: The pointer is valid and points to a valid memory region.
             if unsafe { ptr.read_volatile() } == zero {
                 break;
@@ -399,6 +400,35 @@ fn ensure_thread_context(op: &str, start: usize, len: usize) -> VmResult {
     }
 }
 
+fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: MappingFlags) -> VmResult {
+    check_access(start, len)?;
+    if len == 0 {
+        return Ok(());
+    }
+    ensure_thread_context(op, start, len)?;
+
+    let start = VirtAddr::from(start);
+    let end = start + len;
+    let page_start = start.align_down_4k();
+    let page_end = end.align_up_4k();
+
+    let curr = current();
+    let thr = curr.try_as_thread().ok_or(VmError::AccessDenied)?;
+    let aspace_arc = thr.proc_data.aspace();
+    if unsafe { aspace_arc.raw() }.is_owned_by_current() {
+        return Err(VmError::AccessDenied);
+    }
+
+    let mut aspace = aspace_arc.lock();
+    if !aspace.can_access_range(start, len, access_flags) {
+        return Err(VmError::AccessDenied);
+    }
+
+    aspace
+        .populate_area(page_start, page_end - page_start, access_flags)
+        .map_err(|_| VmError::AccessDenied)
+}
+
 #[extern_trait]
 unsafe impl VmIo for Vm {
     fn new() -> Self {
@@ -409,8 +439,7 @@ unsafe impl VmIo for Vm {
         if buf.is_empty() {
             return Ok(());
         }
-        check_access(start, buf.len())?;
-        ensure_thread_context("read", start, buf.len())?;
+        prepare_user_memory("read", start, buf.len(), MappingFlags::READ)?;
         let failed_at = access_user_memory(|| unsafe {
             user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
         });
@@ -425,8 +454,7 @@ unsafe impl VmIo for Vm {
         if buf.is_empty() {
             return Ok(());
         }
-        check_access(start, buf.len())?;
-        ensure_thread_context("write", start, buf.len())?;
+        prepare_user_memory("write", start, buf.len(), MappingFlags::WRITE)?;
         let failed_at = access_user_memory(|| unsafe {
             user_copy(start as _, buf.as_ptr() as *const _, buf.len())
         });
@@ -515,14 +543,18 @@ impl IoBufMut for VmBytesMut {
     }
 }
 
-/// Writes data to kernel text, ensuring the page permissions are properly handled.
-pub fn write_kernel_text(addr: VirtAddr, data: &[u8]) -> AxResult<()> {
-    if data.is_empty() {
+/// Patches kernel text, ensuring page permissions and instruction-cache
+/// synchronization are handled consistently.
+pub fn patch_kernel_text<F>(addr: VirtAddr, len: usize, action: F) -> AxResult<()>
+where
+    F: FnOnce(*mut u8),
+{
+    if len == 0 {
         return Ok(());
     }
 
     let aligned_addr = addr.align_down_4k();
-    let aligned_length = (addr + data.len()).align_up_4k() - aligned_addr;
+    let aligned_length = (addr + len).align_up_4k() - aligned_addr;
 
     // The kernel address-space lock (`SpinNoIrq`) MUST be acquired *inside* the
     // `stop_machine` critical section, not before it. `stop_machine` itself
@@ -537,34 +569,96 @@ pub fn write_kernel_text(addr: VirtAddr, data: &[u8]) -> AxResult<()> {
     crate::stop_machine::stop_machine(
         move || -> AxResult<()> {
             let mut guard = ax_mm::kernel_aspace().lock();
-            let (_, original_flags, _) = guard.page_table().query(aligned_addr)?;
+            if guard.contains_range(aligned_addr, aligned_length) {
+                let (_, original_flags, _) = guard.page_table().query(aligned_addr)?;
 
-            guard.protect(
-                aligned_addr,
-                aligned_length,
-                original_flags | MappingFlags::WRITE,
-            )?;
+                guard.protect(
+                    aligned_addr,
+                    aligned_length,
+                    original_flags | MappingFlags::WRITE,
+                )?;
 
-            flush_tlb_range(aligned_addr, aligned_length);
+                flush_tlb_range(aligned_addr, aligned_length);
+                action(addr.as_mut_ptr());
 
-            unsafe {
-                core::ptr::copy_nonoverlapping(data.as_ptr(), addr.as_mut_ptr(), data.len());
+                #[cfg(target_arch = "aarch64")]
+                ax_runtime::hal::cpu::asm::clean_dcache_range_to_pou(addr, len);
+
+                guard.protect(aligned_addr, aligned_length, original_flags)?;
+                return Ok(());
             }
 
-            #[cfg(target_arch = "aarch64")]
-            ax_runtime::hal::cpu::asm::clean_dcache_range_to_pou(addr, data.len());
+            #[cfg(target_arch = "loongarch64")]
+            {
+                // LoongArch64 kernel text may execute from the 0x9000... DMW
+                // direct-map window. DMW translations do not consult PTEs, so
+                // there are no page permissions to relax here. Patch directly
+                // while all other CPUs are parked, then rely on the per-CPU
+                // sync callback to flush instruction state.
+                action(addr.as_mut_ptr());
+                return Ok(());
+            }
 
-            guard.protect(aligned_addr, aligned_length, original_flags)?;
-            Ok(())
+            #[cfg(not(target_arch = "loongarch64"))]
+            {
+                Err(AxError::BadAddress)
+            }
         },
         move || sync_modified_kernel_text(aligned_addr, aligned_length),
     )
+}
+
+/// Writes data to kernel text, ensuring the page permissions are properly handled.
+pub fn write_kernel_text(addr: VirtAddr, data: &[u8]) -> AxResult<()> {
+    patch_kernel_text(addr, data.len(), |dst| unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+    })
 }
 
 pub fn flush_tlb_range(start: VirtAddr, size: usize) {
     for offset in (0..size).step_by(PAGE_SIZE_4K) {
         ax_runtime::hal::cpu::asm::flush_tlb(Some(start + offset));
     }
+}
+
+pub fn flush_tlb_range_sync(start: VirtAddr, size: usize) {
+    #[cfg(feature = "ipi")]
+    {
+        flush_tlb_range_remote(start, size);
+    }
+    #[cfg(not(feature = "ipi"))]
+    {
+        flush_tlb_range(start, size);
+    }
+}
+
+#[cfg(feature = "ipi")]
+fn flush_tlb_range_remote(start: VirtAddr, size: usize) {
+    let _guard = ax_kernel_guard::NoPreempt::new();
+    let current_cpu = ax_runtime::hal::percpu::this_cpu_id();
+    let start = start.as_usize();
+    let arg = FlushRangeArg { start, size };
+    let arg_ptr = &arg as *const FlushRangeArg as *mut ();
+
+    for cpu_id in 0..ax_runtime::hal::cpu_num() {
+        if cpu_id == current_cpu || !ax_ipi::wait_until_cpu_ready(cpu_id) {
+            continue;
+        }
+        let _ = unsafe { ax_ipi::run_on_cpu_sync_raw(cpu_id, flush_tlb_range_thunk, arg_ptr) };
+    }
+    flush_tlb_range(VirtAddr::from(start), size);
+}
+
+#[cfg(feature = "ipi")]
+struct FlushRangeArg {
+    start: usize,
+    size: usize,
+}
+
+#[cfg(feature = "ipi")]
+unsafe fn flush_tlb_range_thunk(arg: *mut ()) {
+    let arg = unsafe { &*(arg as *const FlushRangeArg) };
+    flush_tlb_range(VirtAddr::from(arg.start), arg.size);
 }
 
 fn sync_modified_kernel_text(start: VirtAddr, size: usize) {

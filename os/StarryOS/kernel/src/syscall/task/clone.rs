@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use ax_errno::{AxError, AxResult};
-use ax_fs::FS_CONTEXT;
+use ax_fs_ng::vfs::FS_CONTEXT;
 use ax_kspin::SpinNoIrq;
 use ax_runtime::hal::cpu::uspace::UserContext;
 use ax_task::{AxTaskExt, current, spawn_task};
@@ -192,6 +192,13 @@ impl CloneArgs {
             new_uctx.set_tls(tls);
         }
         new_uctx.set_retval(0);
+        #[cfg(target_arch = "riscv64")]
+        let child_fp_fs = match uctx.sstatus.fs() {
+            riscv::register::sstatus::FS::Dirty => riscv::register::sstatus::FS::Clean,
+            fs => fs,
+        };
+        #[cfg(target_arch = "riscv64")]
+        new_uctx.sstatus.set_fs(child_fp_fs);
 
         let set_child_tid = if flags.contains(CloneFlags::CHILD_SETTID) {
             child_tid
@@ -204,6 +211,13 @@ impl CloneArgs {
         let old_proc_data = &curr_thread.proc_data;
 
         let mut new_task = new_user_task(&curr.name(), new_uctx, set_child_tid);
+        #[cfg(target_arch = "riscv64")]
+        {
+            let mut fp_state = ax_cpu::FpState::default();
+            fp_state.save();
+            fp_state.fs = child_fp_fs;
+            new_task.ctx_mut().fp_state = fp_state;
+        }
 
         let tid = new_task.id().as_u64() as Pid;
         if flags.contains(CloneFlags::PARENT_SETTID) && parent_tid != 0 {
@@ -255,6 +269,7 @@ impl CloneArgs {
                 aspace,
                 signal_actions,
                 exit_signal,
+                curr_thread.tid(),
                 flags.contains(CloneFlags::VM),
             );
             proc_data.set_umask(old_proc_data.umask());
@@ -344,6 +359,7 @@ impl CloneArgs {
         if curr_thread.no_new_privs() {
             thr.set_no_new_privs();
         }
+        thr.set_seccomp_state(curr_thread.seccomp_state());
         if flags.contains(CloneFlags::CHILD_CLEARTID) {
             thr.set_clear_child_tid(child_tid);
         }
@@ -370,7 +386,10 @@ impl CloneArgs {
         }
 
         let parent_pid = curr.as_thread().proc_data.proc.pid();
-        let parent_tid = curr.id().as_u64() as Pid;
+        // The user-visible tid, not the scheduler id: they diverge for the init
+        // process (pid/tid pinned to 1, scheduler id higher). Signal delivery
+        // and ptrace below look this up in the tid-keyed task table.
+        let parent_tid = curr.as_thread().tid() as Pid;
         let ptrace_event = if flags.contains(CloneFlags::THREAD) {
             super::ptrace::PTRACE_EVENT_CLONE
         } else if flags.contains(CloneFlags::VFORK) {
@@ -408,12 +427,36 @@ impl CloneArgs {
         // Block the parent until the child exec's or exits.
         if needs_vfork_block {
             new_proc_data.wait_vfork_done();
-            let _ = super::ptrace::ptrace_notify_vfork_done(parent_pid, tid as Pid);
+            let _ = super::ptrace::ptrace_notify_vfork_done(parent_pid, parent_tid, tid as Pid);
         }
 
         Ok(tid as _)
     }
 }
+
+ktracepoint::define_event_trace!(
+    sys_clone,
+    TP_kops(crate::tracepoint::KernelTraceAux),
+    TP_system(syscalls),
+    TP_PROTO(flags:u32, stack:usize, parent_tid:usize),
+    TP_STRUCT__entry {
+        stack: usize,
+        parent_tid: usize,
+        flags: u32,
+    },
+    TP_fast_assign {
+        flags: flags,
+        stack: stack,
+        parent_tid: parent_tid,
+    },
+    TP_ident(__entry),
+    TP_printk({
+        let flags = __entry.flags;
+        let stack = __entry.stack;
+        let parent_tid = __entry.parent_tid;
+        alloc::format!("clone with flags: {flags}, stack: {stack:#x}, parent_tid: {parent_tid:#x}")
+    })
+);
 
 pub fn sys_clone(
     uctx: &UserContext,
@@ -427,6 +470,8 @@ pub fn sys_clone(
     const FLAG_MASK: u32 = 0xff;
     let clone_flags = CloneFlags::from_bits_truncate((flags & !FLAG_MASK) as u64);
     let exit_signal = (flags & FLAG_MASK) as u64;
+
+    trace_sys_clone(clone_flags.bits() as _, stack, parent_tid);
 
     if clone_flags.contains(CloneFlags::PIDFD | CloneFlags::PARENT_SETTID) {
         return Err(AxError::InvalidInput);

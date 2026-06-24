@@ -227,7 +227,7 @@ impl ArchTrait for Arch {
         let vaddr = vaddr as usize;
         #[cfg(any(uspace, hv))]
         {
-            if mmu::is_mmu_enabled() {
+            if mmu::is_kernel_relocated() {
                 if percpu_va_range().contains(&vaddr) {
                     return vaddr - addrspace::PERCPU_BASE;
                 }
@@ -244,6 +244,10 @@ impl ArchTrait for Arch {
 
     fn kernel_space() -> core::ops::Range<usize> {
         addrspace::PAGE_OFFSET..usize::MAX
+    }
+
+    fn is_mmu_enabled() -> bool {
+        satp_mode() != 0
     }
 
     fn kernel_page_table() -> PageTableInfo {
@@ -274,6 +278,15 @@ impl ArchTrait for Arch {
 
     fn shutdown() -> ! {
         let _ = sbi::system_reset_shutdown();
+        loop {
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    fn reset() -> ! {
+        let _ = sbi::system_reset_reboot();
         loop {
             unsafe {
                 core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
@@ -432,17 +445,30 @@ pub(crate) fn disable_local_irqs() {
 }
 
 pub(crate) fn current_page_table() -> PageTableInfo {
-    let satp: usize;
-    unsafe {
-        core::arch::asm!("csrr {satp}, satp", satp = out(reg) satp, options(nostack, preserves_flags));
-    }
-    let mode = satp >> 60;
+    let satp = read_satp();
+    let mode = satp_mode_from(satp);
     let addr = if mode == 0 {
         KERNEL_PAGE_TABLE_ADDR.load(Ordering::Relaxed)
     } else {
         (satp & ((1usize << 44) - 1)) << 12
     };
     PageTableInfo { asid: 0, addr }
+}
+
+fn read_satp() -> usize {
+    let satp: usize;
+    unsafe {
+        core::arch::asm!("csrr {satp}, satp", satp = out(reg) satp, options(nostack, preserves_flags));
+    }
+    satp
+}
+
+fn satp_mode() -> usize {
+    satp_mode_from(read_satp())
+}
+
+fn satp_mode_from(satp: usize) -> usize {
+    satp >> 60
 }
 
 pub(crate) fn write_satp(root_paddr: usize) {
