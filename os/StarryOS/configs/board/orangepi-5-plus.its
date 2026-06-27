@@ -1,0 +1,32 @@
+/dts-v1/;
+
+/ {
+    description = "StarryOS for Orange Pi 5 Plus RK3588";
+    #address-cells = <1>;
+
+    images {
+        kernel {
+            description = "StarryOS kernel";
+            data = /incbin/("${kernel_bin}");
+            type = "kernel";
+            arch = "arm";
+            os = "linux";
+            compression = "none";
+            load = <0x02000000>;
+            entry = <0x02000000>;
+
+            hash {
+                algo = "sha256";
+            };
+        };
+    };
+
+    configurations {
+        default = "config";
+
+        config {
+            description = "StarryOS RK3588";
+            kernel = "kernel";
+        };
+    };
+};
