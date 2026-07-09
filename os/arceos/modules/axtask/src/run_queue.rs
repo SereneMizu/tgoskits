@@ -154,9 +154,13 @@ fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
 #[cfg_attr(all(test, feature = "host-test"), allow(dead_code))]
 fn request_current_reschedule() {
     clear_remote_reschedule_pending_for_current_cpu();
-    #[cfg(feature = "preempt")]
+    #[cfg(all(feature = "preempt", feature = "host-test"))]
     if let Some(curr) = crate::current_may_uninit() {
         curr.set_force_resched_pending(true);
+    }
+    #[cfg(all(feature = "preempt", not(feature = "host-test")))]
+    if crate::current_may_uninit().is_some() {
+        CurrentRunQueueRef::<ax_kernel_guard::NoOp>::force_resched_from_irq();
     }
 }
 
@@ -183,15 +187,45 @@ pub(crate) fn clear_remote_reschedule_pending_for_current_cpu() {
     REMOTE_RESCHEDULE_PENDING.store(false, Ordering::Release);
 }
 
+#[cfg(all(feature = "smp", feature = "ipi"))]
+fn request_remote_reschedule_if_not_pending<F>(pending: &AtomicBool, request: F)
+where
+    F: FnOnce(),
+{
+    if !pending.swap(true, Ordering::AcqRel) {
+        request();
+    }
+}
+
+#[cfg(all(feature = "smp", feature = "ipi"))]
+fn force_remote_reschedule_request<F>(pending: &AtomicBool, request: F)
+where
+    F: FnOnce(),
+{
+    pending.store(true, Ordering::Release);
+    request();
+}
+
 #[cfg(all(
     feature = "smp",
     feature = "ipi",
     not(all(test, feature = "host-test"))
 ))]
 fn request_remote_reschedule(cpu_id: usize) {
-    if !REMOTE_RESCHEDULE_PENDING[cpu_id].swap(true, Ordering::AcqRel) {
+    request_remote_reschedule_if_not_pending(&REMOTE_RESCHEDULE_PENDING[cpu_id], || {
         ax_ipi::run_on_cpu(cpu_id, request_current_reschedule);
-    }
+    });
+}
+
+#[cfg(all(
+    feature = "smp",
+    feature = "ipi",
+    not(all(test, feature = "host-test"))
+))]
+fn force_remote_reschedule(cpu_id: usize) {
+    force_remote_reschedule_request(&REMOTE_RESCHEDULE_PENDING[cpu_id], || {
+        ax_ipi::run_on_cpu(cpu_id, request_current_reschedule);
+    });
 }
 
 #[cfg(all(test, feature = "smp", feature = "ipi", feature = "host-test"))]
@@ -199,9 +233,17 @@ fn request_remote_reschedule(cpu_id: usize) {
     let _ = cpu_id;
     // Host tests run with one dummy CPU and a no-op send_ipi(), so record the
     // scheduler-visible request that a real ax-ipi callback would carry.
-    if !REMOTE_RESCHEDULE_PENDING.swap(true, Ordering::AcqRel) {
+    request_remote_reschedule_if_not_pending(&REMOTE_RESCHEDULE_PENDING, || {
         REMOTE_RESCHEDULE_REQUESTS.fetch_add(1, Ordering::Release);
-    }
+    });
+}
+
+#[cfg(all(test, feature = "smp", feature = "ipi", feature = "host-test"))]
+fn force_remote_reschedule(cpu_id: usize) {
+    let _ = cpu_id;
+    force_remote_reschedule_request(&REMOTE_RESCHEDULE_PENDING, || {
+        REMOTE_RESCHEDULE_REQUESTS.fetch_add(1, Ordering::Release);
+    });
 }
 
 #[cfg(all(feature = "smp", feature = "ipi"))]
@@ -214,9 +256,16 @@ fn kick_remote_cpu(cpu_id: usize) {
     }
 }
 
+#[cfg(all(feature = "smp", feature = "ipi"))]
+fn force_kick_remote_cpu(cpu_id: usize) {
+    if cpu_id != this_cpu_id() {
+        force_remote_reschedule(cpu_id);
+    }
+}
+
 #[cfg(all(test, feature = "smp", feature = "ipi", feature = "host-test"))]
 mod tests {
-    use core::sync::atomic::Ordering;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     // Host-test mode collapses per-CPU state into process-global statics, so
     // keep the shared pending/count assertions in one test.
@@ -290,6 +339,87 @@ mod tests {
 
         super::REMOTE_RESCHEDULE_PENDING.store(false, Ordering::Release);
         super::REMOTE_RESCHEDULE_REQUESTS.store(0, Ordering::Release);
+    }
+
+    #[test]
+    fn forced_remote_reschedule_bypasses_stale_pending() {
+        let pending = AtomicBool::new(true);
+        let requests = AtomicUsize::new(0);
+
+        super::force_remote_reschedule_request(&pending, || {
+            requests.fetch_add(1, Ordering::Release);
+        });
+
+        assert_eq!(
+            requests.load(Ordering::Acquire),
+            1,
+            "forced remote kicks must bypass stale pending coalescing",
+        );
+
+        super::request_remote_reschedule_if_not_pending(&pending, || {
+            requests.fetch_add(1, Ordering::Release);
+        });
+
+        assert_eq!(
+            requests.load(Ordering::Acquire),
+            1,
+            "ordinary remote kicks should still coalesce stale pending requests",
+        );
+
+        super::force_remote_reschedule_request(&pending, || {
+            requests.fetch_add(1, Ordering::Release);
+        });
+
+        assert_eq!(
+            requests.load(Ordering::Acquire),
+            2,
+            "forced remote kicks must not coalesce required migration reschedules",
+        );
+    }
+}
+
+#[cfg(all(test, feature = "sched-rr", feature = "host-test"))]
+mod rr_tests {
+    use alloc::{string::String, sync::Arc};
+    use core::marker::PhantomData;
+
+    use ax_sched::BaseScheduler;
+
+    use super::{AxRunQueue, AxRunQueueRef, Scheduler, SpinRaw, TaskInner};
+    use crate::task::TaskState;
+
+    fn new_test_task(name: &str, state: TaskState) -> crate::AxTaskRef {
+        let task =
+            TaskInner::new(|| {}, String::from(name), crate::default_task_stack_size()).into_arc();
+        task.set_state(state);
+        task
+    }
+
+    #[test]
+    fn unblock_resched_does_not_front_insert_rr_task() {
+        let mut run_queue = AxRunQueue {
+            cpu_id: 1,
+            scheduler: SpinRaw::new(Scheduler::new()),
+        };
+        let queued = new_test_task("queued", TaskState::Ready);
+        let blocked = new_test_task("blocked", TaskState::Blocked);
+
+        run_queue.scheduler.lock().add_task(queued.clone());
+        {
+            let mut run_queue_ref = AxRunQueueRef::<ax_kernel_guard::NoOp> {
+                inner: &mut run_queue,
+                state: (),
+                _phantom: PhantomData,
+            };
+            run_queue_ref.unblock_task(blocked, true);
+        }
+
+        let next = run_queue.scheduler.lock().pick_next_task().unwrap();
+        assert!(
+            Arc::ptr_eq(&next, &queued),
+            "waking a blocked task with resched=true must not move it ahead of already queued RR \
+             tasks",
+        );
     }
 }
 
@@ -447,7 +577,11 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
     /// This function does nothing if the task is not in [`TaskState::Blocked`],
     /// which means the task is already unblocked by other cores.
     pub fn unblock_task(&mut self, task: AxTaskRef, resched: bool) {
-        let task_id_name = task.id_name();
+        let task_id_name = if log::log_enabled!(log::Level::Debug) {
+            Some(task.id_name())
+        } else {
+            None
+        };
         // Try to change the state of the task from `Blocked` to `Ready`,
         // if successful, the task will be put into this run queue,
         // otherwise, the task is already unblocked by other cores.
@@ -455,11 +589,14 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
         // target task can not be insert into the run queue until it finishes its scheduling process.
         if self
             .inner
-            .put_task_with_state(task, TaskState::Blocked, resched)
+            // A wakeup is not a time-slice preemption of the woken task.
+            .put_task_with_state(task, TaskState::Blocked, false)
         {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
-            debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
+            if let Some(task_id_name) = task_id_name {
+                debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
+            }
             // Note: when the task is unblocked on another CPU's run queue,
             // we just ignore the `resched` flag.
             if resched && cpu_id == this_cpu_id() {
@@ -479,13 +616,20 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// See [`AxRunQueueRef::unblock_task`] for the state-transition details.
     #[cfg(feature = "irq")]
     pub(crate) fn unblock_task(&mut self, task: AxTaskRef, resched: bool) {
-        let task_id_name = task.id_name();
+        let task_id_name = if log::log_enabled!(log::Level::Debug) {
+            Some(task.id_name())
+        } else {
+            None
+        };
         if self
             .inner
-            .put_task_with_state(task, TaskState::Blocked, resched)
+            // A wakeup is not a time-slice preemption of the woken task.
+            .put_task_with_state(task, TaskState::Blocked, false)
         {
             let cpu_id = self.inner.cpu_id;
-            debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
+            if let Some(task_id_name) = task_id_name {
+                debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
+            }
             if resched {
                 #[cfg(feature = "preempt")]
                 crate::current().set_preempt_pending(true);
@@ -587,10 +731,15 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 
     #[cfg(feature = "preempt")]
     pub fn force_resched(&mut self) {
+        self.force_resched_with_preempt_count(1);
+    }
+
+    #[cfg(feature = "preempt")]
+    fn force_resched_with_preempt_count(&mut self, current_disable_count: usize) {
         let curr = &self.current_task;
         assert!(curr.is_running());
 
-        let can_preempt = curr.can_preempt(1);
+        let can_preempt = curr.can_preempt(current_disable_count);
         trace!(
             "current task is forced to reschedule: {}, allow={}",
             curr.id_name(),
@@ -609,6 +758,17 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         } else {
             curr.set_force_resched_pending(true);
         }
+    }
+
+    #[cfg(all(
+        feature = "smp",
+        feature = "ipi",
+        feature = "preempt",
+        not(feature = "host-test")
+    ))]
+    fn force_resched_from_irq() {
+        let mut rq = current_run_queue::<ax_kernel_guard::NoOp>();
+        rq.force_resched_with_preempt_count(0);
     }
 
     /// Exit the current task with the specified exit code.
@@ -778,24 +938,44 @@ impl AxRunQueue {
         // If the task's state matches `current_state`, set its state to `Ready` and
         // put it back to the run queue (except idle task).
         if task.transition_state(current_state, TaskState::Ready) && !task.is_idle() {
-            // If the task is blocked, wait for the task to finish its scheduling process.
-            // See `unblock_task()` for details.
-            if current_state == TaskState::Blocked {
-                // Wait for next task's scheduling process to complete.
-                // If the owning (remote) CPU is still in the middle of schedule() with
-                // this task (next task) as prev, wait until it's done referencing the task.
-                //
-                // Pairs with the `clear_prev_task_on_cpu()`.
-                //
-                // Note:
-                // 1. This should be placed after the judgement of `TaskState::Blocked,`,
-                //    because the task may have been woken up by other cores.
-                // 2. This can be placed in the front of `switch_to()`
-                #[cfg(feature = "smp")]
-                while task.on_cpu() {
-                    // Wait for the task to finish its scheduling process.
-                    core::hint::spin_loop();
+            #[cfg(feature = "smp")]
+            let waking_current_task = current_state == TaskState::Blocked
+                && self.cpu_id == this_cpu_id()
+                && crate::current().ptr_eq(&task);
+            // A blocked task woken here may still be finishing its context
+            // switch-out on its owning CPU: `on_cpu == true` means its registers
+            // are not yet fully saved. It must NOT be made runnable (enqueued)
+            // until `on_cpu` is false, or another CPU could resume it with stale
+            // registers. Pairs with `clear_prev_task_on_cpu()`.
+            //
+            // We must NOT busy-spin on `on_cpu` for a task owned by a *remote*
+            // CPU (as the old code did): two CPUs each spinning with IRQs off,
+            // each waiting for the other to reach `clear_prev_task_on_cpu()`, is
+            // a mutual deadlock (whole-board freeze). Instead, hand the enqueue
+            // to the owning CPU via a lock-free stash it drains once its context
+            // is saved. `waking_current_task` (self-wake on this CPU, mid-switch)
+            // keeps the old inline behavior: this CPU finishes the switch in
+            // program order when it returns.
+            #[cfg(feature = "smp")]
+            if current_state == TaskState::Blocked && !waking_current_task && task.on_cpu() {
+                // Record where the task must land, then stash a reference for the
+                // owning CPU to enqueue from `clear_prev_task_on_cpu()`.
+                task.set_cpu_id(self.cpu_id as _);
+                task.stash_wake(task.clone());
+                // Re-check under the SeqCst handshake. If still on its owning CPU,
+                // that CPU drains the stash after its switch completes — done.
+                if task.on_cpu() {
+                    return false;
                 }
+                // `on_cpu` cleared meanwhile: the owning CPU may already have
+                // passed its drain point. Whichever side wins `take_wake` does
+                // the enqueue exactly once.
+                if task.take_wake().is_none() {
+                    // Owner won the swap; it enqueues + kicks the target.
+                    return false;
+                }
+                // We won: the reclaimed reference is dropped here; fall through
+                // and enqueue our own `task` (its context is now saved).
             }
             // TODO: priority
             #[cfg(feature = "smp")]
@@ -839,7 +1019,6 @@ impl AxRunQueue {
             prev_task.id_name(),
             next_task.id_name()
         );
-        #[cfg(feature = "stack-canary")]
         prev_task.check_stack_canary();
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
@@ -959,10 +1138,13 @@ pub(crate) fn migrate_entry(migrated_task: AxTaskRef) {
         .lock()
         .put_prev_task(migrated_task, false);
     #[cfg(all(feature = "smp", feature = "ipi"))]
-    kick_remote_cpu(cpu_id);
+    // Current-task migration cannot make progress until the target CPU runs
+    // the migrated task, so do not let a stale coalescing bit suppress this IPI.
+    force_kick_remote_cpu(cpu_id);
 }
 
-/// Clear the `on_cpu` field of previous task running on this CPU.
+/// Clear the `on_cpu` field of the previous task running on this CPU, then
+/// complete any cross-core wake that was deferred while it was still `on_cpu`.
 #[cfg(feature = "smp")]
 pub(crate) unsafe fn clear_prev_task_on_cpu() {
     let prev = unsafe { PREV_TASK.current_ref_mut_raw() }
@@ -970,7 +1152,42 @@ pub(crate) unsafe fn clear_prev_task_on_cpu() {
         .expect("PREV_TASK should have been set by switch_to");
     // Safety: prev_task's Arc is still alive on the caller's stack at this point
     // (switch_to has not yet returned), so the pointer is valid.
-    unsafe { prev.as_ref() }.set_on_cpu(false);
+    let prev = unsafe { prev.as_ref() };
+    // Publish that the context is fully saved. The SeqCst store pairs with the
+    // waker's `on_cpu()`/`take_wake()` handshake in `put_task_with_state`.
+    prev.set_on_cpu(false);
+    // Drain a wake that raced our switch-out. `take_wake` is the single arbiter:
+    // if the waker did not reclaim it (it saw `on_cpu` still true), we get the
+    // owned reference and enqueue it now that the context is saved.
+    if let Some(task) = prev.take_wake() {
+        let target = task.cpu_id() as usize;
+        // Leaf lock: `resched()` already dropped this CPU's scheduler lock before
+        // `switch_to`, so this takes only the target run queue's lock.
+        get_run_queue(target)
+            .scheduler
+            .lock()
+            .put_prev_task(task, false);
+        if target != this_cpu_id() {
+            // Remote target: ask that CPU to reschedule so it picks the task up
+            // (and wakes if it is idle in `wait_for_irqs`).
+            #[cfg(feature = "ipi")]
+            kick_remote_cpu(target);
+        } else {
+            // Local target: `kick_remote_cpu(self)` is a no-op, so the reschedule
+            // the remote waker's IPI used to deliver here would be lost — the
+            // task could sit un-run until the next tick, or indefinitely if this
+            // CPU just switched to `idle` and is about to `wait_for_irqs()`.
+            // `target == this_cpu_id()` arises when `select_wake_run_queue()`
+            // falls back to the task's `last_cpu`, which is this owning CPU.
+            // Request a reschedule on THIS CPU instead: the current task
+            // (`next_task`, possibly `idle`) is forced to reschedule when the
+            // switch chain unwinds and its preempt guard is released
+            // (`current_check_preempt_pending` consumes the flag), mirroring the
+            // reschedule the IPI path (`request_current_reschedule`) performed.
+            #[cfg(feature = "preempt")]
+            crate::current().set_force_resched_pending(true);
+        }
+    }
 }
 pub(crate) fn init() {
     let cpu_id = this_cpu_id();

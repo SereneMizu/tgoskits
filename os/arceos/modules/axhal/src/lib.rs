@@ -6,7 +6,7 @@
 //!
 //! Currently supported platforms (specify by cargo features):
 //!
-//! - `plat-dyn`: Runtime-discovered platform, including x86_64, AArch64 and RISC-V QEMU boards.
+//! - Runtime-discovered platform support through `axplat-dyn`.
 //! - `dummy`: If none of the above platform is selected, the dummy platform
 //!   will be used. In this platform, most of the operations are no-op or
 //!   `unimplemented!()`. This platform is mainly used for [cargo test].
@@ -43,9 +43,11 @@ mod build_info {
 }
 
 pub mod boot;
+pub mod cache;
 pub mod dtb;
 pub mod mem;
 pub mod percpu;
+pub mod pmu;
 pub mod time;
 
 #[cfg(feature = "tls")]
@@ -163,4 +165,5 @@ macro_rules! addr_of_sym {
         $e as *const () as usize
     };
 }
+#[cfg(feature = "tls")]
 pub(crate) use addr_of_sym;

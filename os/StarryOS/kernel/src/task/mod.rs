@@ -14,11 +14,15 @@ mod user;
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{
     cell::RefCell,
+    future::poll_fn,
     ops::Deref,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering},
+    task::Poll,
 };
 
 use ax_errno::AxResult;
+use ax_kernel_guard::NoPreemptIrqSave;
+use ax_kspin::SpinRwLock as RwLock;
 use ax_runtime::hal::{cpu::uspace::UserContext, time::TimeValue};
 use ax_sync::{Mutex, spin::SpinNoIrq};
 use ax_task::{TaskExt, TaskInner};
@@ -26,7 +30,6 @@ use axpoll::{IoEvents, PollSet};
 use extern_trait::extern_trait;
 use kernel_elf_parser::AuxEntry;
 use scope_local::{ActiveScope, Scope};
-use spin::RwLock;
 use starry_process::{Pid, Process};
 use starry_signal::{
     SignalInfo, SignalSet, Signo,
@@ -61,15 +64,6 @@ struct PtracePendingEvent {
     msg: usize,
 }
 use crate::mm::AddrSpace;
-
-/// Size of the syscall instruction for the current architecture.
-/// Used by SA_RESTART to back up the program counter.
-#[cfg(target_arch = "x86_64")]
-pub const SYSCALL_INSN_LEN: usize = 2;
-/// Size of the syscall instruction for the current architecture.
-/// Used by SA_RESTART to back up the program counter.
-#[cfg(not(target_arch = "x86_64"))]
-pub const SYSCALL_INSN_LEN: usize = 4;
 
 ///  A wrapper type that assumes the inner type is `Sync`.
 #[repr(transparent)]
@@ -145,6 +139,10 @@ pub struct Thread {
     /// Ready to exit
     pub exit: Arc<AtomicBool>,
 
+    /// Woken when a signal arrives at this thread, so signalfd/epoll pollers
+    /// can observe newly-pending signals even when the signal is blocked.
+    pub signalfd_waker: PollSet,
+
     /// Indicates whether the thread is currently accessing user memory.
     accessing_user_memory: AtomicBool,
 
@@ -199,6 +197,14 @@ pub struct Thread {
 
     /// Whether setgroups has been set to "deny" for this thread's user namespace.
     setgroups_deny: AtomicBool,
+
+    /// Per-task hardware-PMU counters attached to this thread by
+    /// `perf_event_open(pid > 0)`. Driven by the scheduler hooks
+    /// ([`crate::perf::task::perf_sched_in`] / `perf_sched_out`) under this
+    /// `SpinNoIrq` (the hooks run with IRQs disabled). Empty for the common case
+    /// where no per-task perf event targets this thread.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) perf_counters: SpinNoIrq<Vec<Arc<crate::perf::task::PerTaskCounter>>>,
 }
 
 impl Thread {
@@ -237,12 +243,16 @@ impl Thread {
             seccomp: SpinNoIrq::new(SeccompState::default()),
             cred: SpinNoIrq::new(cred),
 
+            signalfd_waker: PollSet::new(),
             fault_dump_signo: AtomicU8::new(0),
             kretprobe_stack: SpinNoIrq::new(alloc::vec::Vec::new()),
 
             uid_map_written: AtomicBool::new(false),
             gid_map_written: AtomicBool::new(false),
             setgroups_deny: AtomicBool::new(false),
+
+            #[cfg(target_arch = "aarch64")]
+            perf_counters: SpinNoIrq::new(Vec::new()),
         })
     }
 
@@ -491,9 +501,18 @@ impl TaskExt for Box<Thread> {
         let scope = self.proc_data.scope.read();
         unsafe { ActiveScope::set(&scope) };
         core::mem::forget(scope);
+        // Program any per-task perf counters onto HW for this slice. Runs with
+        // IRQs disabled inside `switch_to`; the hook early-returns cheaply when
+        // no per-task perf event exists anywhere.
+        #[cfg(target_arch = "aarch64")]
+        crate::perf::task::perf_sched_in(self);
     }
 
     fn on_leave(&self) {
+        // Fold this slice's per-task perf counter deltas and stop the counters
+        // before the scope is torn down. Same hot-path constraints as on_enter.
+        #[cfg(target_arch = "aarch64")]
+        crate::perf::task::perf_sched_out(self);
         ActiveScope::set_global();
         unsafe { self.proc_data.scope.force_read_decrement() };
     }
@@ -538,6 +557,29 @@ impl VforkDone {
     pub fn new(poll: Arc<PollSet>) -> Self {
         Self { done: false, poll }
     }
+}
+
+/// Waits on a [`PollSet`] after a caller-supplied condition reports no
+/// immediate result.
+///
+/// The condition is checked before and after waker registration, so callers
+/// avoid lost wakeups.
+pub async fn wait_on_pollset<T>(poll: &PollSet, mut check: impl FnMut() -> Option<T>) -> T {
+    poll_fn(move |cx| {
+        if let Some(value) = check() {
+            return Poll::Ready(value);
+        }
+
+        // Registration happens from wait task context.
+        unsafe { poll.register(cx.waker(), IoEvents::IN) };
+
+        if let Some(value) = check() {
+            Poll::Ready(value)
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 /// A pending job-control status change awaiting report to the parent's
@@ -916,7 +958,10 @@ impl ProcessData {
     /// `TaskExt::on_enter` leaves the current task's active scope installed by
     /// holding one read count on [`Self::scope`]. A syscall running in that task
     /// must temporarily release that read count before taking the write side.
+    /// The closure runs with preemption and local IRQs disabled, so it should
+    /// only install already-prepared scope entries.
     pub fn with_current_scope_mut<R>(&self, f: impl FnOnce(&mut Scope) -> R) -> R {
+        let _guard = NoPreemptIrqSave::new();
         ActiveScope::set_global();
         unsafe { self.scope.force_read_decrement() };
         let mut scope = self.scope.write();
